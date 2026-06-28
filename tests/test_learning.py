@@ -189,10 +189,15 @@ def test_dst_transitions_measure_fifteen_real_minutes(start_utc: datetime) -> No
     assert accepted_rate == pytest.approx(2.0)
 
 
-def test_unusable_timezone_resets_without_raising() -> None:
+@pytest.mark.parametrize(
+    "exception_type",
+    [TypeError, RuntimeError, OSError],
+    ids=["type-error", "runtime-error", "os-error"],
+)
+def test_unusable_timezone_resets_without_raising(exception_type: type[Exception]) -> None:
     class UnusableTimezone(tzinfo):
         def utcoffset(self, dt: datetime | None) -> timedelta | None:
-            raise TypeError("unusable timezone")
+            raise exception_type("unusable timezone")
 
     learner = HeatingRateLearner()
     learner.observe(NOW, 18.0, 21.0, heating=True)

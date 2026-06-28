@@ -42,7 +42,7 @@ def _normalize_timestamp(value: object) -> datetime | None:
         if value.utcoffset() is None:
             return None
         return value.astimezone(timezone.utc)
-    except OverflowError, TypeError, ValueError:
+    except Exception:
         return None
 
 
