@@ -1,8 +1,12 @@
-"""Immutable data models for the central heating controller."""
+"""Data models for the central heating controller."""
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .coordinator import ControllerCoordinator
 
 
 class ControllerStatus(StrEnum):
@@ -59,3 +63,51 @@ class ControlResult:
     target_temperature: float | None
     hvac_mode: str | None
     reason: str
+
+
+JsonPrimitive = str | int | float | bool | None
+
+
+@dataclass
+class PersistentState:
+    """Validated state retained across Home Assistant restarts.
+
+    Validation of untrusted serialized values is performed field-by-field by
+    ``ControllerStore`` so a damaged field cannot invalidate its neighbours.
+    """
+
+    auto_mode: bool = True
+    blast_until: datetime | None = None
+    manual_override_target: float | None = None
+    manual_override_fingerprint: tuple[JsonPrimitive, ...] | None = None
+    learned_rate: float | None = None
+    learned_sample_count: int = 0
+
+
+@dataclass(frozen=True)
+class ControllerState:
+    """Immutable state published by the coordinator after each evaluation.
+
+    ``learned_rate`` is the learner's raw persisted estimate; consumers must
+    consult ``learned_trusted`` before using it for decisions.
+    """
+
+    result: ControlResult
+    current_temperature: float | None
+    learned_rate: float | None
+    learned_trusted: bool
+    arrival_time: datetime | None
+    preheat_start_time: datetime | None
+    warmup_minutes: float | int
+
+    @property
+    def status(self) -> ControllerStatus:
+        """Return the policy status for entity consumers."""
+        return self.result.status
+
+
+@dataclass(frozen=True)
+class ControllerRuntimeData:
+    """Runtime data owned by one config entry."""
+
+    coordinator: "ControllerCoordinator"
