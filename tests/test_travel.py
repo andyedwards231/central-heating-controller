@@ -67,6 +67,14 @@ def test_invalid_arrival_returns_none(raw) -> None:
     assert parse_arrival_time(raw, timezone.utc) is None
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["2026-02-31T12:00:00", "2026-01-01T25:00:00"],
+)
+def test_malformed_iso_arrival_returns_none(raw) -> None:
+    assert parse_arrival_time(raw, timezone.utc) is None
+
+
 def test_naive_iso_arrival_uses_supplied_local_timezone_and_returns_utc() -> None:
     local_tz = timezone(timedelta(hours=2))
     assert parse_arrival_time("2026-01-01T12:30:00", local_tz) == datetime(
@@ -165,6 +173,12 @@ def test_naive_now_is_rejected() -> None:
             60,
             timezone.utc,
         )
+
+
+def test_unusable_now_timezone_is_rejected() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UnusableTimezone())
+    with pytest.raises(ValueError, match="now.*timezone|timezone.*now"):
+        preheat_timing("2026-01-01T14:00:00+00:00", now, 60, timezone.utc)
 
 
 def test_invalid_local_timezone_is_rejected() -> None:

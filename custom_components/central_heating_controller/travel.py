@@ -82,7 +82,10 @@ def parse_arrival_time(raw: object, local_tz: tzinfo | None) -> datetime | None:
             except OverflowError, OSError, ValueError:
                 return None
         else:
-            parsed = dt_util.parse_datetime(value)
+            try:
+                parsed = dt_util.parse_datetime(value)
+            except ValueError:
+                return None
             if parsed is None:
                 return None
     else:
@@ -119,10 +122,20 @@ def preheat_timing(
         raise ValueError("warmup_minutes must not be negative")
     if not _valid_timezone(local_tz):
         raise ValueError("local_tz must be a valid timezone")
-    if now.tzinfo is None or now.utcoffset() is None:
+    if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
-    now_utc = dt_util.as_utc(now)
+    try:
+        now_offset = now.utcoffset()
+    except Exception as err:
+        raise ValueError("now must have a valid timezone") from err
+    if now_offset is None:
+        raise ValueError("now must have a valid timezone")
+    try:
+        now_utc = dt_util.as_utc(now)
+    except Exception as err:
+        raise ValueError("now must have a valid timezone") from err
+
     arrival = parse_arrival_time(raw_arrival, local_tz)
     if arrival is None or arrival <= now_utc:
         return PreheatTiming(True, None, None)
