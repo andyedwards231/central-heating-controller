@@ -825,3 +825,74 @@ async def test_reset_marker_remains_when_storage_save_fails(hass) -> None:
         await coordinator.async_setup()
 
     assert entry.options[OPT_RESET_LEARNING_REQUESTED] is True
+
+
+async def test_cancelled_refresh_does_not_suppress_next_changed_snapshot(hass) -> None:
+    """Genuine cancellation clears early-publication duplicate suppression."""
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    while coordinator._event_unsubscribers:
+        coordinator._event_unsubscribers.pop()()
+    observations = []
+    remove_listener = coordinator.async_add_listener(
+        lambda: observations.append(coordinator.data.status)
+    )
+    service_started = asyncio.Event()
+
+    async def blocked_service(*_args, **_kwargs):
+        service_started.set()
+        await asyncio.Event().wait()
+
+    hass.services.async_call.side_effect = blocked_service
+    hass.states.async_set("schedule.heating", "on")
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await service_started.wait()
+    assert observations == [ControllerStatus.HIGH]
+
+    refresh.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+
+    hass.services.async_call.side_effect = None
+    hass.states.async_set("schedule.heating", "off")
+    await coordinator.async_refresh()
+    remove_listener()
+    assert observations == [ControllerStatus.HIGH, ControllerStatus.LOW]
+
+
+async def test_unchanged_setting_refreshes_current_coordinator_without_reload(hass) -> None:
+    """A no-op option write republishes cleared runtime state locally."""
+    from homeassistant.components.climate import ClimateEntityFeature
+
+    _set_baseline_states(hass)
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        {
+            "current_temperature": 16.0,
+            "temperature": 17.0,
+            "hvac_action": "idle",
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+            "hvac_modes": ["off", "heat"],
+            "min_temp": 7.0,
+            "max_temp": 35.0,
+            "target_temp_step": 0.5,
+        },
+    )
+    coordinator, entry = await _setup_coordinator(hass)
+    entry.add_update_listener(async_update_listener)
+    coordinator.persistent_state.manual_override_target = 18.5
+    coordinator.persistent_state.manual_override_fingerprint = (True,)
+    await coordinator.async_refresh()
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    hass.services.async_call.reset_mock()
+    reload_entry = AsyncMock()
+
+    with patch.object(type(hass.config_entries), "async_reload", reload_entry):
+        await coordinator.async_update_setting(CONF_LOW_TEMP, 17.0)
+        await hass.async_block_till_done()
+
+    reload_entry.assert_not_awaited()
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.data.status is ControllerStatus.LOW
+    hass.services.async_call.assert_not_awaited()

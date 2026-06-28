@@ -257,6 +257,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._evaluation_idle.clear()
         try:
             return await self._async_evaluate_data()
+        except asyncio.CancelledError:
+            self._skip_duplicate_listener_update = False
+            raise
         finally:
             self._evaluation_idle.set()
 
@@ -465,4 +468,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.persistent_state.manual_override_target = None
         self.persistent_state.manual_override_fingerprint = None
         await self.store.async_save(self.persistent_state)
-        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        updated = self.hass.config_entries.async_update_entry(self.entry, options=options)
+        if not updated:
+            await self.async_refresh()
