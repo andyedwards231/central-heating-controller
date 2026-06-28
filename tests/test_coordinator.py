@@ -8,6 +8,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import CoreState
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.central_heating_controller import (
@@ -531,3 +532,86 @@ async def test_entry_unload_shuts_down_only_after_platform_success(hass) -> None
 
     coordinator.async_shutdown.assert_awaited_once_with()
     assert entry.runtime_data is None
+
+
+@pytest.mark.parametrize(
+    ("current_target", "target_step", "expected_calls"),
+    [
+        (17.24, 0.5, 0),
+        (17.26, 0.5, 1),
+        (17.005, 0, 0),
+        (17.02, -1, 1),
+    ],
+)
+async def test_target_step_half_tolerance_controls_target_write(
+    hass, current_target, target_step, expected_calls
+) -> None:
+    """Half a valid thermostat step is the target redundancy tolerance."""
+    _set_baseline_states(hass)
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        {
+            "current_temperature": 16.0,
+            "temperature": current_target,
+            "target_temp_step": target_step,
+            "hvac_action": "idle",
+        },
+    )
+
+    await _setup_coordinator(hass)
+
+    assert hass.services.async_call.await_count == expected_calls
+
+
+async def test_person_coordinates_override_stale_home_state(hass) -> None:
+    """Usable coordinates outside the zone override a stale home state."""
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "home", {ATTR_LATITUDE: 52.0, ATTR_LONGITUDE: -1.0})
+    hass.states.async_set("person.alex", STATE_UNKNOWN)
+
+    coordinator, _ = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is ControllerStatus.AWAY
+
+
+async def test_changed_state_notifies_once_before_service_call(hass) -> None:
+    """A changed snapshot reaches listeners once before climate I/O starts."""
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    while coordinator._event_unsubscribers:
+        coordinator._event_unsubscribers.pop()()
+    events = []
+    remove_listener = coordinator.async_add_listener(
+        lambda: events.append(("listener", coordinator.data.status))
+    )
+
+    async def service_call(*_args, **_kwargs):
+        events.append(("service", coordinator.data.status))
+
+    hass.services.async_call.side_effect = service_call
+    hass.states.async_set("schedule.heating", "on")
+
+    await coordinator.async_refresh()
+
+    remove_listener()
+    assert events == [
+        ("listener", ControllerStatus.HIGH),
+        ("service", ControllerStatus.HIGH),
+        ("service", ControllerStatus.HIGH),
+    ]
+
+
+async def test_startup_publishes_without_commanding_until_running(hass) -> None:
+    """Setup evaluates during startup but defers climate writes until running."""
+    _set_baseline_states(hass)
+    hass.set_state(CoreState.starting)
+
+    coordinator, _ = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is ControllerStatus.LOW
+    hass.services.async_call.assert_not_awaited()
+
+    hass.set_state(CoreState.running)
+    await coordinator.async_refresh()
+    assert hass.services.async_call.await_count == 2

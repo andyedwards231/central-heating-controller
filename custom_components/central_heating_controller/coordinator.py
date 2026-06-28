@@ -11,6 +11,7 @@ from typing import Any
 from homeassistant.components.climate import (
     ATTR_CURRENT_TEMPERATURE,
     ATTR_HVAC_ACTION,
+    ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
     HVACMode,
 )
@@ -24,7 +25,7 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.core import CoreState, Event, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -97,6 +98,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             config_entry=entry,
             name=NAME,
             update_interval=timedelta(minutes=1),
+            always_update=False,
         )
         self.entry = entry
         self.store = ControllerStore(hass, entry.entry_id)
@@ -105,6 +107,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.pending_hvac_mode: str | None = None
         self.pending_target: float | None = None
         self._event_unsubscribers: list[Callable[[], None]] = []
+        self._skip_duplicate_listener_update = False
 
     @property
     def config(self) -> dict[str, Any]:
@@ -162,6 +165,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         """Request a fresh immutable snapshot after any input change."""
         self.hass.async_create_task(self.async_request_refresh())
 
+    @callback
+    def async_update_listeners(self) -> None:
+        """Suppress the refresh completion notification after early publication."""
+        if self._skip_duplicate_listener_update:
+            self._skip_duplicate_listener_update = False
+            return
+        super().async_update_listeners()
+
     async def async_shutdown(self) -> None:
         """Remove subscriptions and the coordinator's interval timer."""
         while self._event_unsubscribers:
@@ -205,6 +216,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 try:
                     if in_zone(zone, latitude, longitude):
                         return True
+                    continue
                 except KeyError, TypeError, ValueError:
                     pass
             if _normalized_location(person.state) in zone_candidates:
@@ -315,7 +327,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             preheat_start_time=start,
             warmup_minutes=warmup_minutes,
         )
-        self.data = state
+        if state != self.data:
+            self.async_set_updated_data(state)
+            self._skip_duplicate_listener_update = True
         await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
         return state
 
@@ -323,7 +337,12 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self, climate: State | None, desired_mode: str | None, desired_target: float | None
     ) -> None:
         """Apply policy intent in mode-then-temperature order."""
-        if not self._available(climate) or desired_mode is None or climate is None:
+        if (
+            self.hass.state is not CoreState.running
+            or not self._available(climate)
+            or desired_mode is None
+            or climate is None
+        ):
             return
         entity_id = self.config[CONF_CLIMATE]
         if climate.state != desired_mode:
@@ -343,7 +362,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         target = _finite_float(desired_target)
         current_target = _finite_float(climate.attributes.get(ATTR_TEMPERATURE))
-        if target is None or (current_target is not None and abs(target - current_target) <= 0.01):
+        target_step = _finite_float(climate.attributes.get(ATTR_TARGET_TEMP_STEP))
+        tolerance = target_step / 2 if target_step is not None and target_step > 0 else 0.01
+        if target is None or (
+            current_target is not None and abs(target - current_target) <= tolerance
+        ):
             return
         self.pending_target = target
         try:
