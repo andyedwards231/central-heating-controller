@@ -59,7 +59,13 @@ from .const import (
     OPT_RESET_LEARNING_REQUESTED,
 )
 from .learning import HeatingRateLearner
-from .models import ControlInputs, ControllerSettings, ControllerState, PersistentState
+from .models import (
+    ControlInputs,
+    ControllerSettings,
+    ControllerState,
+    JsonPrimitive,
+    PersistentState,
+)
 from .policy import evaluate_policy
 from .storage import ControllerStore
 from .travel import destination_is_home, preheat_timing
@@ -96,6 +102,23 @@ def _normalized_location(value: object) -> str | None:
     return normalized.removeprefix("zone.") or None
 
 
+def _target_tolerance(climate: State) -> float:
+    """Return the thermostat's target comparison tolerance."""
+    target_step = _finite_float(climate.attributes.get(ATTR_TARGET_TEMP_STEP))
+    return target_step / 2 if target_step is not None and target_step > 0 else 0.01
+
+
+def _targets_match(climate: State, first: object, second: object) -> bool:
+    """Compare two finite targets using the thermostat's declared precision."""
+    first_target = _finite_float(first)
+    second_target = _finite_float(second)
+    return (
+        first_target is not None
+        and second_target is not None
+        and abs(first_target - second_target) <= _target_tolerance(climate)
+    )
+
+
 class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     """Own snapshots, policy evaluation, persistence, and thermostat writes."""
 
@@ -117,6 +140,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._event_unsubscribers: list[Callable[[], None]] = []
         self._skip_duplicate_listener_update = False
         self._shutting_down = False
+        self._last_policy_fingerprint: tuple[JsonPrimitive, ...] | None = None
+        self._event_lock = asyncio.Lock()
+        self._event_tasks: set[asyncio.Task[Any]] = set()
         self._evaluation_idle = asyncio.Event()
         self._evaluation_idle.set()
 
@@ -183,9 +209,70 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
-        """Request a fresh immutable snapshot after any input change."""
+        """Track serialized acknowledgement, override, and refresh work."""
+        if self._shutting_down:
+            return
+        task = self.hass.async_create_task(self._async_handle_state_change(event))
+        self._event_tasks.add(task)
+        task.add_done_callback(self._event_tasks.discard)
+
+    async def _async_handle_state_change(self, event: Event) -> None:
+        """Classify climate changes before refreshing the policy snapshot."""
+        async with self._event_lock:
+            if self._shutting_down:
+                return
+            new_state = event.data.get("new_state")
+            old_state = event.data.get("old_state")
+            if isinstance(new_state, State) and new_state.entity_id == self.config[CONF_CLIMATE]:
+                await self._async_handle_climate_change(old_state, new_state)
+            if not self._shutting_down:
+                await self.async_request_refresh()
+
+    async def _async_handle_climate_change(self, old_state: State | None, new_state: State) -> None:
+        """Consume command acknowledgements or persist an external target."""
+        if self.pending_hvac_mode == new_state.state:
+            self.pending_hvac_mode = None
+
+        new_target = _finite_float(new_state.attributes.get(ATTR_TEMPERATURE))
+        old_target = (
+            _finite_float(old_state.attributes.get(ATTR_TEMPERATURE))
+            if isinstance(old_state, State)
+            else None
+        )
+        if self.pending_target is not None:
+            if _targets_match(new_state, new_target, self.pending_target):
+                self.pending_target = None
+                return
+            if (
+                old_target is not None
+                and new_target is not None
+                and not _targets_match(new_state, old_target, new_target)
+            ):
+                self.pending_target = None
+
+        if (
+            new_target is None
+            or old_target is None
+            or _targets_match(new_state, old_target, new_target)
+            or self._last_policy_fingerprint is None
+            or not self.persistent_state.auto_mode
+            or (
+                self.persistent_state.blast_until is not None
+                and self.persistent_state.blast_until > dt_util.utcnow()
+            )
+        ):
+            return
+
+        fingerprint = self._last_policy_fingerprint
+        if (
+            self.persistent_state.manual_override_target == new_target
+            and self.persistent_state.manual_override_fingerprint == fingerprint
+        ):
+            return
+        self.persistent_state.manual_override_target = new_target
+        self.persistent_state.manual_override_fingerprint = fingerprint
         if not self._shutting_down:
-            self.hass.async_create_task(self.async_request_refresh())
+            await self.store.async_save(self.persistent_state)
 
     @callback
     def async_update_listeners(self) -> None:
@@ -197,10 +284,12 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         super().async_update_listeners()
 
     async def async_shutdown(self) -> None:
-        """Stop new work, remove listeners, and wait for active evaluation."""
+        """Stop new work, drain event handlers, and wait for active evaluation."""
         self._shutting_down = True
         while self._event_unsubscribers:
             self._event_unsubscribers.pop()()
+        if self._event_tasks:
+            await asyncio.gather(*tuple(self._event_tasks), return_exceptions=True)
         await self._evaluation_idle.wait()
         await super().async_shutdown()
 
@@ -338,6 +427,31 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.persistent_state.blast_until = None
                 await self.store.async_save(self.persistent_state)
 
+        fingerprint: tuple[JsonPrimitive, ...] = (
+            occupied,
+            schedule_high,
+            journey_home,
+            preheat_ready,
+            settings.high_temperature,
+            settings.low_temperature,
+            settings.eco_temperature,
+            settings.active_hvac_mode,
+        )
+        if self.persistent_state.manual_override_target is not None and thermostat_available:
+            assert climate is not None
+            if (
+                not _targets_match(
+                    climate,
+                    current_target,
+                    self.persistent_state.manual_override_target,
+                )
+                or self.persistent_state.manual_override_fingerprint != fingerprint
+            ):
+                self.persistent_state.manual_override_target = None
+                self.persistent_state.manual_override_fingerprint = None
+                await self.store.async_save(self.persistent_state)
+        self._last_policy_fingerprint = fingerprint
+
         result = evaluate_policy(
             ControlInputs(
                 thermostat_available=thermostat_available,
@@ -401,11 +515,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         target = _finite_float(desired_target)
         current_target = _finite_float(climate.attributes.get(ATTR_TEMPERATURE))
-        target_step = _finite_float(climate.attributes.get(ATTR_TARGET_TEMP_STEP))
-        tolerance = target_step / 2 if target_step is not None and target_step > 0 else 0.01
-        if target is None or (
-            current_target is not None and abs(target - current_target) <= tolerance
-        ):
+        if target is None or _targets_match(climate, target, current_target):
             return
         self.pending_target = target
         try:
