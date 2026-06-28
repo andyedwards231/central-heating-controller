@@ -1,5 +1,58 @@
 {
   "title": "Central Heating Controller",
+  "entity": {
+    "switch": {
+      "auto_mode": {
+        "name": "Auto mode"
+      }
+    },
+    "button": {
+      "heat_blast": {
+        "name": "Heat blast"
+      }
+    },
+    "number": {
+      "high_temperature": {
+        "name": "High temperature"
+      },
+      "low_temperature": {
+        "name": "Low temperature"
+      },
+      "eco_temperature": {
+        "name": "Eco temperature"
+      },
+      "fallback_warmup_minutes": {
+        "name": "Fallback warm-up duration"
+      },
+      "maximum_warmup_minutes": {
+        "name": "Maximum warm-up duration"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "high": "High",
+          "low": "Low",
+          "pre_heating": "Pre-heating",
+          "away": "Away",
+          "off": "Off",
+          "heat_blast": "Heat blast",
+          "manual_override": "Manual override",
+          "unavailable": "Unavailable"
+        }
+      },
+      "effective_target_temperature": {
+        "name": "Effective target temperature"
+      },
+      "learned_heating_rate": {
+        "name": "Learned heating rate"
+      },
+      "preheat_start_time": {
+        "name": "Pre-heat start time"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
