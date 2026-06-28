@@ -139,6 +139,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.pending_target: float | None = None
         self._event_unsubscribers: list[Callable[[], None]] = []
         self._skip_duplicate_listener_update = False
+        self._accepting_events = True
         self._shutting_down = False
         self._last_policy_fingerprint: tuple[JsonPrimitive, ...] | None = None
         self._event_lock = asyncio.Lock()
@@ -210,7 +211,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     @callback
     def _handle_state_change(self, event: Event) -> None:
         """Track serialized acknowledgement, override, and refresh work."""
-        if self._shutting_down:
+        if not self._accepting_events:
             return
         task = self.hass.async_create_task(self._async_handle_state_change(event))
         self._event_tasks.add(task)
@@ -285,11 +286,12 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     async def async_shutdown(self) -> None:
         """Stop new work, drain event handlers, and wait for active evaluation."""
-        self._shutting_down = True
+        self._accepting_events = False
         while self._event_unsubscribers:
             self._event_unsubscribers.pop()()
         if self._event_tasks:
             await asyncio.gather(*tuple(self._event_tasks), return_exceptions=True)
+        self._shutting_down = True
         await self._evaluation_idle.wait()
         await super().async_shutdown()
 
@@ -534,10 +536,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
         self.persistent_state.auto_mode = enabled
+        self.persistent_state.manual_override_target = None
+        self.persistent_state.manual_override_fingerprint = None
         if not enabled:
             self.persistent_state.blast_until = None
-            self.persistent_state.manual_override_target = None
-            self.persistent_state.manual_override_fingerprint = None
         await self.store.async_save(self.persistent_state)
         await self.async_refresh()
 

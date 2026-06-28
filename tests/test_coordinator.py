@@ -1210,31 +1210,64 @@ async def test_restart_restores_only_future_heat_blast(hass, future) -> None:
     assert coordinator.persistent_state.blast_until == (deadline if future else None)
 
 
-async def test_shutdown_drains_active_external_event_and_blocks_followup_work(hass) -> None:
-    """Unload waits for event persistence and prevents refresh or later writes."""
+async def test_shutdown_drains_queued_external_events_and_blocks_followup_work(hass) -> None:
+    """Unload persists accepted events in order and rejects callbacks after shutdown."""
     _set_baseline_states(hass)
     _set_synchronised_climate(hass)
     coordinator, _ = await _setup_coordinator(hass)
     save_started = asyncio.Event()
     release_save = asyncio.Event()
+    saved_targets = []
 
-    async def blocked_save(_state):
-        save_started.set()
-        await release_save.wait()
+    async def blocked_first_save(state):
+        saved_targets.append(state.manual_override_target)
+        if len(saved_targets) == 1:
+            save_started.set()
+            await release_save.wait()
 
-    coordinator.store.async_save.side_effect = blocked_save
+    coordinator.store.async_save.side_effect = blocked_first_save
     hass.services.async_call.reset_mock()
     _set_synchronised_climate(hass, 18.5)
     await save_started.wait()
+    _set_synchronised_climate(hass, 19.0)
+    await asyncio.sleep(0)
+    assert len(coordinator._event_tasks) == 2
 
     shutdown = asyncio.create_task(coordinator.async_shutdown())
     await asyncio.sleep(0)
     assert not shutdown.done()
     release_save.set()
     await shutdown
-    hass.services.async_call.assert_not_awaited()
 
-    coordinator.store.async_save.reset_mock()
-    _set_synchronised_climate(hass, 19.0)
+    assert saved_targets[-1] == 19.0
+    assert coordinator.persistent_state.manual_override_target == 19.0
+
+    saves_after_shutdown = len(saved_targets)
+    calls_after_shutdown = hass.services.async_call.await_count
+    _set_synchronised_climate(hass, 19.5)
     await hass.async_block_till_done()
-    coordinator.store.async_save.assert_not_awaited()
+    assert len(saved_targets) == saves_after_shutdown
+    assert hass.services.async_call.await_count == calls_after_shutdown
+
+
+async def test_enabling_auto_clears_restored_manual_override(hass) -> None:
+    """An explicit Auto enable durably resumes ordinary automated policy."""
+    _set_baseline_states(hass)
+    _set_synchronised_climate(hass, 18.5)
+    state = PersistentState(
+        auto_mode=False,
+        manual_override_target=18.5,
+        manual_override_fingerprint=(True, False, False, False, 20.0, 17.0, 14.0, "heat"),
+    )
+    coordinator, _ = await _setup_coordinator(hass, state=state)
+    assert coordinator.data.status is ControllerStatus.OFF
+    coordinator.store.async_save.reset_mock()
+
+    await coordinator.async_set_auto_mode(True)
+
+    assert coordinator.data.status is ControllerStatus.LOW
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.persistent_state.manual_override_fingerprint is None
+    saved = coordinator.store.async_save.await_args.args[0]
+    assert saved.manual_override_target is None
+    assert saved.manual_override_fingerprint is None
