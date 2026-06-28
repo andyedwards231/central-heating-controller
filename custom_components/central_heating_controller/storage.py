@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import math
 from typing import Any
 
@@ -11,6 +12,8 @@ from homeassistant.helpers.storage import Store
 
 from .const import STORAGE_KEY, STORAGE_VERSION
 from .models import JsonPrimitive, PersistentState
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _finite_float(value: object) -> float | None:
@@ -66,8 +69,12 @@ class ControllerStore:
         try:
             raw = await self._store.async_load()
         except Exception:
+            _LOGGER.warning("Unable to load controller storage; using safe defaults")
+            return PersistentState()
+        if raw is None:
             return PersistentState()
         if not isinstance(raw, dict):
+            _LOGGER.warning("Invalid controller storage root; using safe defaults")
             return PersistentState()
 
         auto_mode = raw.get("auto_mode")
@@ -81,6 +88,20 @@ class ControllerStore:
         learned_consistent = valid_count and (
             (rate is None and count == 0) or (rate is not None and 0 < rate <= 10 and count > 0)
         )
+
+        invalid_fields: list[str] = []
+        if "auto_mode" in raw and not isinstance(auto_mode, bool):
+            invalid_fields.append("auto_mode")
+        if raw.get("blast_until") is not None and blast_until is None:
+            invalid_fields.append("blast_until")
+        if raw.get("manual_override_target") is not None and manual_target is None:
+            invalid_fields.append("manual_override_target")
+        if raw.get("manual_override_fingerprint") is not None and fingerprint is None:
+            invalid_fields.append("manual_override_fingerprint")
+        if ("learned_rate" in raw or "learned_sample_count" in raw) and not learned_consistent:
+            invalid_fields.extend(("learned_rate", "learned_sample_count"))
+        for field in dict.fromkeys(invalid_fields):
+            _LOGGER.debug("Ignoring invalid controller storage field: %s", field)
 
         return PersistentState(
             auto_mode=auto_mode if isinstance(auto_mode, bool) else True,

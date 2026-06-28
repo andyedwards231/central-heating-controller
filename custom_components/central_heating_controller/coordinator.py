@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import timedelta
 import logging
@@ -25,7 +26,14 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import CoreState, Event, HomeAssistant, State, callback
+from homeassistant.core import (
+    EVENT_HOMEASSISTANT_STARTED,
+    CoreState,
+    Event,
+    HomeAssistant,
+    State,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -108,6 +116,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.pending_target: float | None = None
         self._event_unsubscribers: list[Callable[[], None]] = []
         self._skip_duplicate_listener_update = False
+        self._shutting_down = False
+        self._evaluation_idle = asyncio.Event()
+        self._evaluation_idle.set()
 
     @property
     def config(self) -> dict[str, Any]:
@@ -130,53 +141,67 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     async def async_setup(self) -> None:
         """Restore state, consume one-shot actions, subscribe, and refresh."""
-        self.persistent_state = await self.store.async_load()
-        self.learner = HeatingRateLearner(
-            self.persistent_state.learned_rate,
-            self.persistent_state.learned_sample_count,
-        )
-
-        if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
-            self.learner.reset()
-            self._copy_learning_state()
-            options = dict(self.entry.options)
-            options.pop(OPT_RESET_LEARNING_REQUESTED, None)
-            self.hass.config_entries.async_update_entry(self.entry, options=options)
-            await self.store.async_save(self.persistent_state)
-
-        config = self.config
-        entity_ids = [
-            config[CONF_CLIMATE],
-            *config[CONF_PERSONS],
-            config[CONF_HOME_ZONE],
-            config[CONF_SCHEDULE],
-            config[CONF_DESTINATION],
-        ]
-        if config.get(CONF_ARRIVAL_TIME):
-            entity_ids.append(config[CONF_ARRIVAL_TIME])
-        for entity_id in dict.fromkeys(entity_ids):
-            self._event_unsubscribers.append(
-                async_track_state_change_event(self.hass, entity_id, self._handle_state_change)
+        try:
+            self.persistent_state = await self.store.async_load()
+            self.learner = HeatingRateLearner(
+                self.persistent_state.learned_rate,
+                self.persistent_state.learned_sample_count,
             )
-        await self.async_config_entry_first_refresh()
+
+            if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
+                self.learner.reset()
+                self._copy_learning_state()
+                await self.store.async_save(self.persistent_state)
+                options = dict(self.entry.options)
+                options.pop(OPT_RESET_LEARNING_REQUESTED, None)
+                self.hass.config_entries.async_update_entry(self.entry, options=options)
+
+            config = self.config
+            entity_ids = [
+                config[CONF_CLIMATE],
+                *config[CONF_PERSONS],
+                config[CONF_HOME_ZONE],
+                config[CONF_SCHEDULE],
+                config[CONF_DESTINATION],
+            ]
+            if config.get(CONF_ARRIVAL_TIME):
+                entity_ids.append(config[CONF_ARRIVAL_TIME])
+            for entity_id in dict.fromkeys(entity_ids):
+                self._event_unsubscribers.append(
+                    async_track_state_change_event(self.hass, entity_id, self._handle_state_change)
+                )
+            if self.hass.state is not CoreState.running:
+                self._event_unsubscribers.append(
+                    self.hass.bus.async_listen_once(
+                        EVENT_HOMEASSISTANT_STARTED, self._handle_state_change
+                    )
+                )
+            await self.async_config_entry_first_refresh()
+        except BaseException:
+            await self.async_shutdown()
+            raise
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
         """Request a fresh immutable snapshot after any input change."""
-        self.hass.async_create_task(self.async_request_refresh())
+        if not self._shutting_down:
+            self.hass.async_create_task(self.async_request_refresh())
 
     @callback
     def async_update_listeners(self) -> None:
         """Suppress the refresh completion notification after early publication."""
         if self._skip_duplicate_listener_update:
             self._skip_duplicate_listener_update = False
-            return
+            if self.last_update_success:
+                return
         super().async_update_listeners()
 
     async def async_shutdown(self) -> None:
-        """Remove subscriptions and the coordinator's interval timer."""
+        """Stop new work, remove listeners, and wait for active evaluation."""
+        self._shutting_down = True
         while self._event_unsubscribers:
             self._event_unsubscribers.pop()()
+        await self._evaluation_idle.wait()
         await super().async_shutdown()
 
     def _climate_state(self) -> State | None:
@@ -228,7 +253,17 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.persistent_state.learned_sample_count = self.learner.sample_count
 
     async def _async_update_data(self) -> ControllerState:
+        """Track a complete evaluation so shutdown can await it."""
+        self._evaluation_idle.clear()
+        try:
+            return await self._async_evaluate_data()
+        finally:
+            self._evaluation_idle.set()
+
+    async def _async_evaluate_data(self) -> ControllerState:
         """Build one snapshot, publish it, then safely apply its command intent."""
+        if self._shutting_down and self.data is not None:
+            return self.data
         now = dt_util.utcnow()
         config = self.config
         settings = self.settings
@@ -338,7 +373,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     ) -> None:
         """Apply policy intent in mode-then-temperature order."""
         if (
-            self.hass.state is not CoreState.running
+            self._shutting_down
+            or self.hass.state is not CoreState.running
             or not self._available(climate)
             or desired_mode is None
             or climate is None
@@ -358,7 +394,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.pending_hvac_mode = None
                 _LOGGER.error("Failed setting HVAC mode for %s: %s", entity_id, err)
 
-        if desired_mode == HVACMode.OFF or desired_target is None:
+        if self._shutting_down or desired_mode == HVACMode.OFF or desired_target is None:
             return
         target = _finite_float(desired_target)
         current_target = _finite_float(climate.attributes.get(ATTR_TEMPERATURE))
@@ -430,4 +466,3 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.persistent_state.manual_override_fingerprint = None
         await self.store.async_save(self.persistent_state)
         self.hass.config_entries.async_update_entry(self.entry, options=options)
-        await self.async_refresh()

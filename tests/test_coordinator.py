@@ -1,5 +1,6 @@
 """Tests for controller persistence and coordination."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import math
 from unittest.mock import AsyncMock, Mock, patch
@@ -8,7 +9,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import CoreState
+from homeassistant.core import CoreState, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.central_heating_controller import (
@@ -34,8 +35,11 @@ from custom_components.central_heating_controller.const import (
     OPT_RESET_LEARNING_REQUESTED,
 )
 from custom_components.central_heating_controller.coordinator import ControllerCoordinator
-from custom_components.central_heating_controller.models import PersistentState
-from custom_components.central_heating_controller.models import ControllerStatus
+from custom_components.central_heating_controller.models import (
+    ControllerRuntimeData,
+    ControllerStatus,
+    PersistentState,
+)
 from custom_components.central_heating_controller.storage import ControllerStore
 
 
@@ -200,6 +204,36 @@ async def test_storage_corrupt_data_never_raises(hass, stored) -> None:
     state = await store.async_load()
 
     assert state == PersistentState()
+
+
+async def test_storage_logs_safe_corruption_context(hass, caplog) -> None:
+    """Storage corruption is observable without logging stored contents."""
+    store = ControllerStore(hass, "entry-1")
+    caplog.set_level("DEBUG", logger="custom_components.central_heating_controller.storage")
+    store._store.async_load = AsyncMock(return_value=None)
+    assert await store.async_load() == PersistentState()
+    assert caplog.text == ""
+
+    store._store.async_load = AsyncMock(side_effect=RuntimeError("private raw payload"))
+
+    assert await store.async_load() == PersistentState()
+    assert "private raw payload" not in caplog.text
+    assert "load" in caplog.text.lower()
+
+    caplog.clear()
+    store._store.async_load = AsyncMock(return_value=["private raw payload"])
+    assert await store.async_load() == PersistentState()
+    assert "private raw payload" not in caplog.text
+    assert "root" in caplog.text.lower()
+
+    caplog.clear()
+    store._store.async_load = AsyncMock(
+        return_value={"auto_mode": "private raw payload", "blast_until": "not-a-date"}
+    )
+    assert await store.async_load() == PersistentState()
+    assert "private raw payload" not in caplog.text
+    assert "auto_mode" in caplog.text
+    assert "blast_until" in caplog.text
 
 
 async def test_occupied_schedule_high_commands_mode_then_temperature(hass) -> None:
@@ -469,6 +503,38 @@ async def test_update_setting_uses_shared_capability_validation(hass) -> None:
     assert entry.options[CONF_LOW_TEMP] == 18.0
 
 
+async def test_update_setting_relies_on_single_reload_without_old_writer(hass) -> None:
+    """An option update schedules reload without refreshing the old coordinator."""
+    from homeassistant.components.climate import ClimateEntityFeature
+
+    _set_baseline_states(hass)
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        {
+            "current_temperature": 16.0,
+            "temperature": 17.0,
+            "hvac_action": "idle",
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+            "hvac_modes": ["off", "heat"],
+            "min_temp": 7.0,
+            "max_temp": 35.0,
+            "target_temp_step": 0.5,
+        },
+    )
+    coordinator, entry = await _setup_coordinator(hass)
+    entry.add_update_listener(async_update_listener)
+    hass.services.async_call.reset_mock()
+    reload_entry = AsyncMock()
+
+    with patch.object(type(hass.config_entries), "async_reload", reload_entry):
+        await coordinator.async_update_setting(CONF_LOW_TEMP, 18.0)
+        await hass.async_block_till_done()
+
+    reload_entry.assert_awaited_once_with(entry.entry_id)
+    hass.services.async_call.assert_not_awaited()
+
+
 async def test_state_event_requests_refresh(hass) -> None:
     """A subscribed state event requests a coordinator refresh."""
     _set_baseline_states(hass)
@@ -522,16 +588,15 @@ async def test_entry_unload_shuts_down_only_after_platform_success(hass) -> None
     entry = _entry()
     entry.add_to_hass(hass)
     coordinator = Mock(async_shutdown=AsyncMock())
-    from custom_components.central_heating_controller.models import ControllerRuntimeData
-
-    entry.runtime_data = ControllerRuntimeData(coordinator)
+    runtime_data = ControllerRuntimeData(coordinator)
+    entry.runtime_data = runtime_data
     unload = AsyncMock(return_value=True)
 
     with patch.object(type(hass.config_entries), "async_unload_platforms", unload):
         assert await async_unload_entry(hass, entry) is True
 
     coordinator.async_shutdown.assert_awaited_once_with()
-    assert entry.runtime_data is None
+    assert entry.runtime_data is runtime_data
 
 
 @pytest.mark.parametrize(
@@ -615,3 +680,148 @@ async def test_startup_publishes_without_commanding_until_running(hass) -> None:
     hass.set_state(CoreState.running)
     await coordinator.async_refresh()
     assert hass.services.async_call.await_count == 2
+
+
+async def test_unexpected_service_failure_notifies_failure_and_recovery(hass) -> None:
+    """Early publication never hides coordinator failure or recovery notifications."""
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    while coordinator._event_unsubscribers:
+        coordinator._event_unsubscribers.pop()()
+    observations = []
+    remove_listener = coordinator.async_add_listener(
+        lambda: observations.append((coordinator.data.status, coordinator.last_update_success))
+    )
+    hass.states.async_set("schedule.heating", "on")
+    hass.services.async_call.side_effect = RuntimeError("unexpected")
+
+    await coordinator.async_refresh()
+
+    assert observations == [
+        (ControllerStatus.HIGH, True),
+        (ControllerStatus.HIGH, False),
+    ]
+    hass.services.async_call.side_effect = None
+    await coordinator.async_refresh()
+    remove_listener()
+    assert observations[-1] == (ControllerStatus.HIGH, True)
+
+
+async def test_shutdown_waits_for_evaluation_and_stops_followup_target(hass) -> None:
+    """Unload waits for active mode I/O and prevents the old target write."""
+    _set_baseline_states(hass)
+    coordinator, entry = await _setup_coordinator(hass)
+    entry.runtime_data = ControllerRuntimeData(coordinator)
+    hass.services.async_call.reset_mock()
+    mode_started = asyncio.Event()
+    release_mode = asyncio.Event()
+    services = []
+
+    async def blocked_service(_domain, service, _data, *, blocking):
+        services.append(service)
+        if service == "set_hvac_mode":
+            mode_started.set()
+            await release_mode.wait()
+
+    hass.services.async_call.side_effect = blocked_service
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await mode_started.wait()
+    unload_platforms = AsyncMock(return_value=True)
+    with patch.object(type(hass.config_entries), "async_unload_platforms", unload_platforms):
+        unload = asyncio.create_task(async_unload_entry(hass, entry))
+        await asyncio.sleep(0)
+        assert not unload.done()
+        release_mode.set()
+        await refresh
+        assert await unload is True
+
+    assert services == ["set_hvac_mode"]
+    hass.services.async_call.side_effect = None
+    hass.services.async_call.reset_mock()
+    replacement, _ = await _setup_coordinator(hass)
+    assert replacement.data.status is ControllerStatus.LOW
+    assert hass.services.async_call.await_count == 2
+
+
+async def test_first_refresh_failure_cleans_state_subscriptions(hass) -> None:
+    """Coordinator setup failure removes every acquired listener and timer."""
+    _set_baseline_states(hass)
+    entry = _entry()
+    entry.add_to_hass(hass)
+    coordinator = ControllerCoordinator(hass, entry)
+    coordinator.store.async_load = AsyncMock(return_value=PersistentState())
+    unsubs = [Mock() for _ in range(7)]
+
+    with (
+        patch(
+            "custom_components.central_heating_controller.coordinator.async_track_state_change_event",
+            side_effect=unsubs,
+        ),
+        patch.object(
+            coordinator,
+            "async_config_entry_first_refresh",
+            AsyncMock(side_effect=RuntimeError("refresh failed")),
+        ),
+        pytest.raises(RuntimeError, match="refresh failed"),
+    ):
+        await coordinator.async_setup()
+
+    assert coordinator._shutdown_requested is True
+    for unsub in unsubs:
+        unsub.assert_called_once_with()
+
+
+async def test_forward_failure_rolls_back_platforms_and_coordinator(hass) -> None:
+    """Platform forwarding failure leaves an inert runtime without masking the error."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    coordinator = Mock(async_setup=AsyncMock(), async_shutdown=AsyncMock())
+    forward = AsyncMock(side_effect=RuntimeError("forward failed"))
+    unload = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "custom_components.central_heating_controller.ControllerCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(type(hass.config_entries), "async_forward_entry_setups", forward),
+        patch.object(type(hass.config_entries), "async_unload_platforms", unload),
+        pytest.raises(RuntimeError, match="forward failed"),
+    ):
+        await async_setup_entry(hass, entry)
+
+    coordinator.async_shutdown.assert_awaited_once_with()
+    unload.assert_awaited_once()
+    assert entry.runtime_data.coordinator is coordinator
+
+
+async def test_started_event_refreshes_without_polling_listener(hass) -> None:
+    """A pre-running setup commands immediately when Home Assistant starts."""
+    _set_baseline_states(hass)
+    hass.set_state(CoreState.starting)
+    coordinator, _ = await _setup_coordinator(hass)
+    hass.services.async_call.assert_not_awaited()
+
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
+
+    assert coordinator.data.status is ControllerStatus.LOW
+    assert hass.services.async_call.await_count == 2
+
+
+async def test_reset_marker_remains_when_storage_save_fails(hass) -> None:
+    """A failed durable reset retains its one-shot marker for setup retry."""
+    _set_baseline_states(hass)
+    entry = _entry(options={OPT_RESET_LEARNING_REQUESTED: True})
+    entry.add_to_hass(hass)
+    coordinator = ControllerCoordinator(hass, entry)
+    coordinator.store.async_load = AsyncMock(
+        return_value=PersistentState(learned_rate=1.0, learned_sample_count=3)
+    )
+    coordinator.store.async_save = AsyncMock(side_effect=RuntimeError("disk full"))
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        await coordinator.async_setup()
+
+    assert entry.options[OPT_RESET_LEARNING_REQUESTED] is True
