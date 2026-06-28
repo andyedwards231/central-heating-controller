@@ -1324,6 +1324,31 @@ async def test_delayed_own_target_echo_reasserts_manual_override(hass) -> None:
     assert hass.states.get("climate.hallway").attributes["temperature"] == 18.5
 
 
+async def test_contextless_delayed_own_target_echo_preserves_manual_override(hass) -> None:
+    """A contextless delayed echo still acknowledges outstanding provenance."""
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    assert coordinator.pending_target == 17.0
+
+    _set_synchronised_climate(hass, 18.5)
+    await hass.async_block_till_done()
+    assert coordinator.persistent_state.manual_override_target == 18.5
+    hass.services.async_call.reset_mock()
+
+    _set_synchronised_climate(hass, 17.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.pending_target == 18.5
+    assert all(record.value != 17.0 for record in coordinator._target_command_records)
+    assert coordinator.persistent_state.manual_override_target == 18.5
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    assert hass.services.async_call.await_args.args == (
+        "climate",
+        "set_temperature",
+        {"entity_id": "climate.hallway", "temperature": 18.5},
+    )
+
+
 async def test_superseded_target_and_mode_echoes_use_command_ledger(hass) -> None:
     """Reordered echoes retire their own records without becoming external input."""
     _set_baseline_states(hass)
@@ -1662,6 +1687,31 @@ async def test_service_context_child_is_strong_target_acknowledgement(hass) -> N
         candidate.context.id != record.context.id
         for candidate in coordinator._target_command_records
     )
+
+
+async def test_transient_classification_failure_retries_accepted_event(hass) -> None:
+    """An accepted event remains queued until classification succeeds once."""
+    coordinator = await _create_override(hass)
+    original_classify = coordinator._async_classify_event
+    attempts = 0
+    retry_completed = asyncio.Event()
+
+    async def fail_once(event):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient classification failure")
+        await original_classify(event)
+        retry_completed.set()
+
+    coordinator._async_classify_event = fail_once
+    hass.states.async_set("schedule.heating", "on")
+    await asyncio.wait_for(retry_completed.wait(), timeout=1)
+    await hass.async_block_till_done()
+
+    assert attempts == 2
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.data.status is ControllerStatus.HIGH
 
 
 async def test_shutdown_restarts_failed_worker_to_drain_accepted_event(hass) -> None:

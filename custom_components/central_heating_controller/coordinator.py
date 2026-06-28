@@ -324,7 +324,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         """Classify each admitted event in order, then reconcile final state once."""
         while True:
             while self._event_queue:
-                await self._async_classify_event(self._event_queue.popleft())
+                event = self._event_queue[0]
+                await self._async_classify_event(event)
+                self._event_queue.popleft()
             await self.async_refresh()
             if not self._event_queue:
                 return
@@ -361,12 +363,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             target=True,
         )
         if target_match is not None:
-            target_record, strength = target_match
+            target_record, _strength = target_match
             self._retire_command_record(self._target_command_records, target_record)
             manual_target = self.persistent_state.manual_override_target
             if (
-                strength is _CommandMatchStrength.STRONG
-                and manual_target is not None
+                manual_target is not None
                 and not _targets_match(new_state, new_target, manual_target)
             ):
                 self._stale_own_target_echo = True
@@ -428,7 +429,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 return record, _CommandMatchStrength.STRONG
         if (
             not records
-            or self.persistent_state.manual_override_target is not None
             or state.context.user_id is not None
             or state.context.parent_id is not None
         ):
