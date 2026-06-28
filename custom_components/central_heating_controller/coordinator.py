@@ -732,18 +732,20 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         destination = self.hass.states.get(config[CONF_DESTINATION])
         arrival_entity = config.get(CONF_ARRIVAL_TIME)
         eta = self.hass.states.get(arrival_entity) if arrival_entity else None
+        arrival_entity_missing = bool(arrival_entity) and eta is None
         missing_keys = {
             key
             for key, missing in (
                 (CONF_CLIMATE, climate is None),
-                (CONF_PERSONS, any(state is None for state in person_states.values())),
+                (
+                    CONF_PERSONS,
+                    not person_states
+                    or any(state is None for state in person_states.values()),
+                ),
                 (CONF_HOME_ZONE, home_zone is None),
                 (CONF_SCHEDULE, schedule is None),
                 (CONF_DESTINATION, destination is None),
-                (
-                    CONF_ARRIVAL_TIME,
-                    bool(arrival_entity) and eta is None,
-                ),
+                (CONF_ARRIVAL_TIME, arrival_entity_missing),
             )
             if missing
         }
@@ -791,7 +793,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         arrival = None
         start = None
         preheat_ready = False
-        if journey_home:
+        if journey_home and not arrival_entity_missing:
             raw_eta = eta.state if self._available(eta) and eta is not None else None
             local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
             timing = preheat_timing(raw_eta, now, int(warmup_minutes), local_tz)

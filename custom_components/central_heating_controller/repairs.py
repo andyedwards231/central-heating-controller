@@ -26,6 +26,12 @@ _INPUT_LABELS = {
 }
 
 
+def delete_entry_issues(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete every repair issue owned by a config entry."""
+    for config_key in _INPUT_LABELS:
+        ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_{config_key}")
+
+
 def sync_missing_entity_issues(
     hass: HomeAssistant,
     entry: ConfigEntry,

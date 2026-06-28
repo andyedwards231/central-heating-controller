@@ -14,6 +14,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 
 from custom_components.central_heating_controller import (
+    async_remove_entry,
     async_setup_entry,
     async_unload_entry,
     async_update_listener,
@@ -333,7 +334,6 @@ async def test_unavailable_climate_publishes_without_commands(hass) -> None:
         (("person.andy", "person.alex"), "work", "work", ControllerStatus.HIGH),
         (("schedule.heating",), "home", "work", ControllerStatus.LOW),
         (("sensor.destination",), "work", "home", ControllerStatus.AWAY),
-        (("sensor.eta",), "work", "home", ControllerStatus.PREHEATING),
     ],
 )
 async def test_missing_input_fallbacks(
@@ -425,6 +425,135 @@ async def test_unconfigured_arrival_entity_never_creates_issue(hass) -> None:
             DOMAIN, f"{entry.entry_id}_{CONF_ARRIVAL_TIME}"
         )
         is None
+    )
+
+
+async def test_configured_missing_arrival_disables_preheat_and_creates_issue(hass) -> None:
+    """A removed configured ETA disables travel preheat until it is restored."""
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "work")
+    hass.states.async_set("person.alex", STATE_UNKNOWN)
+    hass.states.async_set("sensor.destination", "home")
+    hass.states.async_remove("sensor.eta")
+
+    coordinator, entry = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is ControllerStatus.AWAY
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{entry.entry_id}_{CONF_ARRIVAL_TIME}"
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("eta_state", [STATE_UNKNOWN, STATE_UNAVAILABLE, "malformed"])
+async def test_configured_existing_invalid_arrival_preheats_immediately(
+    hass, eta_state
+) -> None:
+    """An existing ETA entity with no usable time keeps approved immediate preheat."""
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "work")
+    hass.states.async_set("person.alex", STATE_UNKNOWN)
+    hass.states.async_set("sensor.destination", "home")
+    hass.states.async_set("sensor.eta", eta_state)
+
+    coordinator, entry = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is ControllerStatus.PREHEATING
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{entry.entry_id}_{CONF_ARRIVAL_TIME}"
+        )
+        is None
+    )
+
+
+async def test_empty_person_collection_is_conservatively_occupied_and_repaired(hass) -> None:
+    """Legacy empty people config follows schedule and reports the broken input."""
+    _set_baseline_states(hass)
+    hass.states.async_set("schedule.heating", "on")
+    hass.states.async_set("sensor.destination", "work")
+
+    coordinator, entry = await _setup_coordinator(hass, data={CONF_PERSONS: []})
+
+    assert coordinator.data.status is ControllerStatus.HIGH
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{entry.entry_id}_{CONF_PERSONS}"
+        )
+        is not None
+    )
+
+
+async def test_restored_entity_event_resolves_issue_and_refreshes_policy(hass) -> None:
+    """Restoring a subscribed input automatically repairs and re-evaluates."""
+    _set_baseline_states(hass)
+    hass.states.async_remove("schedule.heating")
+    coordinator, entry = await _setup_coordinator(hass)
+    registry = ir.async_get(hass)
+    issue_id = f"{entry.entry_id}_{CONF_SCHEDULE}"
+    assert coordinator.data.status is ControllerStatus.LOW
+    assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+    hass.states.async_set("schedule.heating", "on")
+    await hass.async_block_till_done()
+
+    assert coordinator.data.status is ControllerStatus.HIGH
+    assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_reconfigured_entity_resolves_existing_issue(hass) -> None:
+    """Pointing a broken config key at a valid entity removes its repair issue."""
+    _set_baseline_states(hass)
+    hass.states.async_remove("schedule.heating")
+    hass.states.async_set("schedule.replacement", "on")
+    coordinator, entry = await _setup_coordinator(hass)
+    registry = ir.async_get(hass)
+    issue_id = f"{entry.entry_id}_{CONF_SCHEDULE}"
+    assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=dict(entry.options) | {CONF_SCHEDULE: "schedule.replacement"},
+    )
+    await coordinator.async_refresh()
+
+    assert coordinator.data.status is ControllerStatus.HIGH
+    assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_entry_removal_deletes_all_repair_issues(hass) -> None:
+    """Removing a config entry leaves no orphaned repair notifications."""
+    _set_baseline_states(hass)
+    for entity_id in (
+        "climate.hallway",
+        "person.andy",
+        "zone.home",
+        "schedule.heating",
+        "sensor.destination",
+        "sensor.eta",
+    ):
+        hass.states.async_remove(entity_id)
+    _, entry = await _setup_coordinator(hass)
+    registry = ir.async_get(hass)
+    issue_ids = {
+        f"{entry.entry_id}_{key}"
+        for key in (
+            CONF_CLIMATE,
+            CONF_PERSONS,
+            CONF_HOME_ZONE,
+            CONF_SCHEDULE,
+            CONF_DESTINATION,
+            CONF_ARRIVAL_TIME,
+        )
+    }
+    assert all(registry.async_get_issue(DOMAIN, issue_id) for issue_id in issue_ids)
+
+    await async_remove_entry(hass, entry)
+
+    assert all(
+        registry.async_get_issue(DOMAIN, issue_id) is None for issue_id in issue_ids
     )
 
 

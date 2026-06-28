@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.components.diagnostics import REDACTED
-from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
+from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, STATE_UNAVAILABLE
 
 from custom_components.central_heating_controller.const import (
     CONF_ACTIVE_HVAC_MODE,
@@ -178,5 +178,27 @@ async def test_config_entry_diagnostics_are_useful_and_explicitly_redacted(
         "2026-06-28T17:30:00Z",
     ):
         assert secret not in serialized
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=dict(entry.options) | {CONF_ARRIVAL_TIME: None},
+    )
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["entity_availability"][CONF_ARRIVAL_TIME] is None
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=dict(entry.options) | {CONF_ARRIVAL_TIME: "sensor.removed_eta"},
+    )
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["entity_availability"][CONF_ARRIVAL_TIME] is False
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=dict(entry.options) | {CONF_ARRIVAL_TIME: "sensor.private_vehicle_eta"},
+    )
+    hass.states.async_set("sensor.private_vehicle_eta", STATE_UNAVAILABLE)
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["entity_availability"][CONF_ARRIVAL_TIME] is False
 
     await coordinator.async_shutdown()

@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN, PLATFORMS
 from .coordinator import ControllerCoordinator
 from .models import ControllerRuntimeData
+from .repairs import delete_entry_issues
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,9 +56,15 @@ async def async_update_listener(hass: HomeAssistant, entry: CentralHeatingConfig
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+async def async_remove_entry(hass: HomeAssistant, entry: CentralHeatingConfigEntry) -> None:
+    """Delete repair issues when a config entry is removed."""
+    delete_entry_issues(hass, entry)
+
+
 __all__ = (
     "DOMAIN",
     "CentralHeatingConfigEntry",
+    "async_remove_entry",
     "async_setup_entry",
     "async_unload_entry",
     "async_update_listener",

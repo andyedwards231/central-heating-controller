@@ -96,7 +96,9 @@ async def async_get_config_entry_diagnostics(
             CONF_HOME_ZONE: _available(hass.states.get(config[CONF_HOME_ZONE])),
             CONF_SCHEDULE: _available(hass.states.get(config[CONF_SCHEDULE])),
             CONF_DESTINATION: _available(hass.states.get(config[CONF_DESTINATION])),
-            CONF_ARRIVAL_TIME: bool(arrival_entity) and _available(hass.states.get(arrival_entity)),
+            CONF_ARRIVAL_TIME: (
+                _available(hass.states.get(arrival_entity)) if arrival_entity else None
+            ),
         },
         "sensitive_state": {
             "arrival_time": REDACTED,
