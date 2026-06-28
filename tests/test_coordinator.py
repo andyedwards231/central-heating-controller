@@ -9,7 +9,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import CoreState, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import Context, CoreState, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.central_heating_controller import (
@@ -244,16 +244,14 @@ async def test_occupied_schedule_high_commands_mode_then_temperature(hass) -> No
     coordinator, _ = await _setup_coordinator(hass)
 
     assert coordinator.data.status is ControllerStatus.HIGH
-    assert hass.services.async_call.await_args_list == [
-        (
-            ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "heat"}),
-            {"blocking": True},
-        ),
-        (
-            ("climate", "set_temperature", {"entity_id": "climate.hallway", "temperature": 20.0}),
-            {"blocking": True},
-        ),
+    assert [call.args for call in hass.services.async_call.await_args_list] == [
+        ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "heat"}),
+        ("climate", "set_temperature", {"entity_id": "climate.hallway", "temperature": 20.0}),
     ]
+    assert all(
+        call.kwargs["blocking"] is True and isinstance(call.kwargs["context"], Context)
+        for call in hass.services.async_call.await_args_list
+    )
 
 
 @pytest.mark.parametrize(
@@ -359,8 +357,15 @@ async def test_service_failure_clears_pending_and_retries(hass) -> None:
     await coordinator.async_refresh()
 
     assert hass.services.async_call.await_count == 4
-    assert coordinator.pending_hvac_mode is None
-    assert coordinator.pending_target is None
+    failed_context_ids = {
+        call.kwargs["context"].id for call in hass.services.async_call.await_args_list
+    }
+    assert failed_context_ids.isdisjoint(
+        record.context.id for record in coordinator._hvac_command_records
+    )
+    assert failed_context_ids.isdisjoint(
+        record.context.id for record in coordinator._target_command_records
+    )
 
 
 async def test_blast_auto_and_expiry_actions(hass) -> None:
@@ -467,12 +472,10 @@ async def test_auto_off_commands_only_hvac_off(hass) -> None:
 
     await coordinator.async_set_auto_mode(False)
 
-    assert hass.services.async_call.await_args_list == [
-        (
-            ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "off"}),
-            {"blocking": True},
-        )
+    assert [call.args for call in hass.services.async_call.await_args_list] == [
+        ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "off"})
     ]
+    assert isinstance(hass.services.async_call.await_args.kwargs["context"], Context)
 
 
 async def test_update_setting_uses_shared_capability_validation(hass) -> None:
@@ -549,12 +552,12 @@ async def test_state_event_requests_refresh(hass) -> None:
         side_effect=track,
     ):
         coordinator, _ = await _setup_coordinator(hass)
-    coordinator.async_request_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     actions[0](Mock())
     await hass.async_block_till_done()
 
-    coordinator.async_request_refresh.assert_awaited_once_with()
+    coordinator.async_refresh.assert_awaited_once_with()
 
 
 async def test_entry_setup_forwards_and_reload_listener_runs(hass) -> None:
@@ -717,7 +720,7 @@ async def test_shutdown_waits_for_evaluation_and_stops_followup_target(hass) -> 
     release_mode = asyncio.Event()
     services = []
 
-    async def blocked_service(_domain, service, _data, *, blocking):
+    async def blocked_service(_domain, service, _data, *, blocking, context=None):
         services.append(service)
         if service == "set_hvac_mode":
             mode_started.set()
@@ -966,8 +969,8 @@ async def test_external_target_creates_and_persists_manual_override(hass) -> Non
     coordinator.store.async_save.assert_awaited_once_with(coordinator.persistent_state)
 
 
-async def test_mismatched_pending_target_is_external_override(hass) -> None:
-    """A target echo differing from our outstanding command is external."""
+async def test_external_target_preserves_unacknowledged_command_provenance(hass) -> None:
+    """An external target does not retire an older command that may still echo."""
     _set_baseline_states(hass)
     coordinator, _ = await _setup_coordinator(hass)
     assert coordinator.pending_target == 17.0
@@ -975,7 +978,7 @@ async def test_mismatched_pending_target_is_external_override(hass) -> None:
     _set_synchronised_climate(hass, 18.5)
     await hass.async_block_till_done()
 
-    assert coordinator.pending_target is None
+    assert coordinator.pending_target == 17.0
     assert coordinator.persistent_state.manual_override_target == 18.5
     assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
 
@@ -993,12 +996,10 @@ async def test_external_hvac_only_change_is_corrected_without_override(hass) -> 
     await hass.async_block_till_done()
 
     assert coordinator.persistent_state.manual_override_target is None
-    assert hass.services.async_call.await_args_list == [
-        (
-            ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "heat"}),
-            {"blocking": True},
-        )
+    assert [call.args for call in hass.services.async_call.await_args_list] == [
+        ("climate", "set_hvac_mode", {"entity_id": "climate.hallway", "hvac_mode": "heat"})
     ]
+    assert isinstance(hass.services.async_call.await_args.kwargs["context"], Context)
 
 
 @pytest.mark.parametrize("mode", ["auto_off", "blast"])
@@ -1231,7 +1232,9 @@ async def test_shutdown_drains_queued_external_events_and_blocks_followup_work(h
     await save_started.wait()
     _set_synchronised_climate(hass, 19.0)
     await asyncio.sleep(0)
-    assert len(coordinator._event_tasks) == 2
+    assert coordinator._event_worker is not None
+    assert len(coordinator._event_tasks) == 1
+    assert len(coordinator._event_queue) == 1
 
     shutdown = asyncio.create_task(coordinator.async_shutdown())
     await asyncio.sleep(0)
@@ -1271,3 +1274,281 @@ async def test_enabling_auto_clears_restored_manual_override(hass) -> None:
     saved = coordinator.store.async_save.await_args.args[0]
     assert saved.manual_override_target is None
     assert saved.manual_override_fingerprint is None
+
+
+async def test_delayed_own_target_echo_reasserts_manual_override(hass) -> None:
+    """A delayed own target echo cannot replace a newer external override."""
+    _set_baseline_states(hass)
+    issued = []
+    echo_reassert = False
+
+    async def echoing_service(_domain, service, data, *, blocking, context=None):
+        assert blocking is True
+        issued.append((service, dict(data), context))
+        if service == "set_temperature" and data["temperature"] == 18.5 and echo_reassert:
+            old = hass.states.get("climate.hallway")
+            assert old is not None
+            hass.states.async_set(
+                "climate.hallway",
+                old.state,
+                dict(old.attributes) | {"temperature": 18.5},
+                context=context,
+            )
+
+    hass.services.async_call.side_effect = echoing_service
+    coordinator, _ = await _setup_coordinator(hass)
+    target_17_context = next(
+        context
+        for service, data, context in issued
+        if service == "set_temperature" and data["temperature"] == 17.0
+    )
+    assert isinstance(target_17_context, Context)
+
+    _set_synchronised_climate(hass, 18.5)
+    await hass.async_block_till_done()
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+
+    echo_reassert = True
+    old = hass.states.get("climate.hallway")
+    assert old is not None
+    hass.states.async_set(
+        "climate.hallway",
+        old.state,
+        dict(old.attributes) | {"temperature": 17.0},
+        context=target_17_context,
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.persistent_state.manual_override_target == 18.5
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    assert hass.states.get("climate.hallway").attributes["temperature"] == 18.5
+
+
+async def test_superseded_target_and_mode_echoes_use_command_ledger(hass) -> None:
+    """Reordered echoes retire their own records without becoming external input."""
+    _set_baseline_states(hass)
+    issued = []
+
+    async def delayed_service(_domain, service, data, *, blocking, context=None):
+        issued.append((service, dict(data), context))
+
+    hass.services.async_call.side_effect = delayed_service
+    coordinator, _ = await _setup_coordinator(hass)
+    target_17_context = next(
+        context
+        for service, data, context in issued
+        if service == "set_temperature" and data["temperature"] == 17.0
+    )
+    heat_context = next(context for service, _data, context in issued if service == "set_hvac_mode")
+
+    hass.states.async_set("schedule.heating", "on")
+    await coordinator.async_refresh()
+    target_20_context = next(
+        context
+        for service, data, context in reversed(issued)
+        if service == "set_temperature" and data["temperature"] == 20.0
+    )
+    old = hass.states.get("climate.hallway")
+    assert old is not None
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        dict(old.attributes) | {"temperature": 15.0},
+    )
+    await coordinator.async_set_auto_mode(False)
+    off_context = next(
+        context
+        for service, data, context in reversed(issued)
+        if service == "set_hvac_mode" and data["hvac_mode"] == "off"
+    )
+
+    old = hass.states.get("climate.hallway")
+    assert old is not None
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        dict(old.attributes) | {"temperature": 17.0},
+        context=target_17_context,
+    )
+    hass.states.async_set(
+        "climate.hallway",
+        "heat",
+        dict(old.attributes) | {"temperature": 20.0},
+        context=target_20_context,
+    )
+    hass.states.async_set(
+        "climate.hallway",
+        "off",
+        dict(old.attributes) | {"temperature": 20.0},
+        context=off_context,
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.persistent_state.manual_override_target is None
+    remaining_target_contexts = {
+        record.context.id for record in coordinator._target_command_records
+    }
+    assert not remaining_target_contexts & {
+        target_17_context.id,
+        target_20_context.id,
+    }, remaining_target_contexts
+    assert all(
+        record.context.id not in {heat_context.id, off_context.id}
+        for record in coordinator._hvac_command_records
+    )
+
+
+async def test_rapid_external_targets_reconcile_once_after_backlog(hass) -> None:
+    """No policy command interleaves between queued external target changes."""
+    _set_baseline_states(hass)
+    _set_synchronised_climate(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    saves = 0
+    commanded_targets = []
+
+    async def blocked_first_save(_state):
+        nonlocal saves
+        saves += 1
+        if saves == 1:
+            save_started.set()
+            await release_save.wait()
+
+    async def echoing_service(_domain, service, data, *, blocking, context=None):
+        if service != "set_temperature":
+            return
+        target = data["temperature"]
+        commanded_targets.append(target)
+        old = hass.states.get("climate.hallway")
+        assert old is not None
+        hass.states.async_set(
+            "climate.hallway",
+            old.state,
+            dict(old.attributes) | {"temperature": target},
+            context=context,
+        )
+
+    coordinator.store.async_save.side_effect = blocked_first_save
+    hass.services.async_call.side_effect = echoing_service
+    _set_synchronised_climate(hass, 18.5)
+    await save_started.wait()
+    _set_synchronised_climate(hass, 19.0)
+    await asyncio.sleep(0)
+    release_save.set()
+    await hass.async_block_till_done()
+
+    assert commanded_targets == []
+    assert coordinator.persistent_state.manual_override_target == 19.0
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+
+
+async def test_schedule_round_trip_still_clears_manual_override(hass) -> None:
+    """An off-on-off schedule backlog is a sticky policy transition."""
+    coordinator = await _create_override(hass)
+    hass.states.async_set("schedule.heating", "on")
+    hass.states.async_set("schedule.heating", "off")
+    await hass.async_block_till_done()
+
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.data.status is ControllerStatus.LOW
+
+
+async def test_override_save_failure_blocks_policy_until_durable_retry(hass) -> None:
+    """An external override is never published before its durable save succeeds."""
+    _set_baseline_states(hass)
+    _set_synchronised_climate(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    coordinator.store.async_save.reset_mock()
+    hass.services.async_call.reset_mock()
+    attempts = 0
+    stored = None
+
+    async def flaky_save(state):
+        nonlocal attempts, stored
+        attempts += 1
+        if attempts <= 2:
+            raise RuntimeError("disk unavailable")
+        stored = PersistentState(
+            auto_mode=state.auto_mode,
+            blast_until=state.blast_until,
+            manual_override_target=state.manual_override_target,
+            manual_override_fingerprint=state.manual_override_fingerprint,
+            learned_rate=state.learned_rate,
+            learned_sample_count=state.learned_sample_count,
+        )
+
+    coordinator.store.async_save.side_effect = flaky_save
+    _set_synchronised_climate(hass, 18.5)
+    await hass.async_block_till_done()
+
+    assert attempts == 2
+    assert coordinator.data.status is ControllerStatus.LOW
+    hass.services.async_call.assert_not_awaited()
+
+    await coordinator.async_refresh()
+    assert attempts == 3
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    assert stored is not None
+
+    await coordinator.async_shutdown()
+    replacement, _ = await _setup_coordinator(hass, state=stored)
+    assert replacement.data.status is ControllerStatus.MANUAL_OVERRIDE
+
+
+async def test_command_ledgers_are_bounded_and_expire(hass) -> None:
+    """Transient command provenance is capped and expires without persistence."""
+    _set_baseline_states(hass)
+    with patch(
+        "custom_components.central_heating_controller.coordinator.time.monotonic",
+        return_value=1000.0,
+    ):
+        coordinator, _ = await _setup_coordinator(hass)
+        for _ in range(20):
+            await coordinator.async_refresh()
+
+    assert len(coordinator._target_command_records) == 16
+    assert len(coordinator._hvac_command_records) == 16
+    with patch(
+        "custom_components.central_heating_controller.coordinator.time.monotonic",
+        return_value=1400.0,
+    ):
+        coordinator._prune_command_records(coordinator._target_command_records)
+        coordinator._prune_command_records(coordinator._hvac_command_records)
+
+    assert not coordinator._target_command_records
+    assert not coordinator._hvac_command_records
+    assert coordinator.pending_target is None
+    assert coordinator.pending_hvac_mode is None
+
+
+async def test_journey_eta_change_with_same_readiness_retains_override(hass) -> None:
+    """Raw journey ETA movement retains override until readiness actually flips."""
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "work")
+    hass.states.async_set("sensor.destination", "home")
+    hass.states.async_set("sensor.eta", "2026-06-28T19:00:00+00:00")
+    _set_synchronised_climate(hass, 14.0)
+    coordinator, _ = await _setup_coordinator(hass)
+    with patch(
+        "custom_components.central_heating_controller.coordinator.dt_util.utcnow",
+        return_value=NOW,
+    ):
+        _set_synchronised_climate(hass, 18.5)
+        await hass.async_block_till_done()
+        hass.states.async_set("sensor.eta", "2026-06-28T18:45:00+00:00")
+        await hass.async_block_till_done()
+
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    assert coordinator.persistent_state.manual_override_target == 18.5
+
+
+async def test_rapid_person_handoff_with_continuous_occupancy_retains_override(hass) -> None:
+    """Event-ordered person substitution avoids a false aggregate transition."""
+    coordinator = await _create_override(hass)
+    hass.states.async_set("person.alex", "home")
+    hass.states.async_set("person.andy", "work")
+    await hass.async_block_till_done()
+
+    assert coordinator.data.status is ControllerStatus.MANUAL_OVERRIDE
+    assert coordinator.persistent_state.manual_override_target == 18.5

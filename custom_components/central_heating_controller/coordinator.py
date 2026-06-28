@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 import logging
 import math
+import time
 from typing import Any
 
 from homeassistant.components.climate import (
@@ -28,6 +31,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import (
     EVENT_HOMEASSISTANT_STARTED,
+    Context,
     CoreState,
     Event,
     HomeAssistant,
@@ -36,7 +40,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .config_flow import _climate_capabilities, _validate_settings
@@ -81,6 +85,29 @@ _SETTING_KEYS = {
     CONF_MAX_WARMUP_MINUTES,
     CONF_DESTINATION_HOME_VALUE,
 }
+_COMMAND_RECORD_LIMIT = 16
+_COMMAND_RECORD_TTL_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class _CommandRecord:
+    """Transient provenance for one climate service write."""
+
+    value: str | float
+    issued_at: datetime
+    issued_monotonic: float
+    generation: int
+    context: Context
+
+
+@dataclass(frozen=True)
+class _CapturedEvent:
+    """Immutable state transition captured synchronously at admission."""
+
+    entity_id: str | None
+    old_state: State | None
+    new_state: State | None
+    policy_transition: bool
 
 
 def _finite_float(value: object) -> float | None:
@@ -137,13 +164,22 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.learner = HeatingRateLearner()
         self.pending_hvac_mode: str | None = None
         self.pending_target: float | None = None
+        self._command_generation = 0
+        self._target_command_records: deque[_CommandRecord] = deque(maxlen=_COMMAND_RECORD_LIMIT)
+        self._hvac_command_records: deque[_CommandRecord] = deque(maxlen=_COMMAND_RECORD_LIMIT)
         self._event_unsubscribers: list[Callable[[], None]] = []
         self._skip_duplicate_listener_update = False
         self._accepting_events = True
         self._shutting_down = False
         self._last_policy_fingerprint: tuple[JsonPrimitive, ...] | None = None
-        self._event_lock = asyncio.Lock()
+        self._event_queue: deque[_CapturedEvent] = deque()
+        self._event_worker: asyncio.Task[Any] | None = None
         self._event_tasks: set[asyncio.Task[Any]] = set()
+        self._admitted_person_states: dict[str, State | None] = {}
+        self._clear_override_for_event = False
+        self._stale_own_target_echo = False
+        self._override_dirty = False
+        self._override_revision = 0
         self._evaluation_idle = asyncio.Event()
         self._evaluation_idle.set()
 
@@ -184,6 +220,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.hass.config_entries.async_update_entry(self.entry, options=options)
 
             config = self.config
+            self._admitted_person_states = {
+                entity_id: self.hass.states.get(entity_id) for entity_id in config[CONF_PERSONS]
+            }
             entity_ids = [
                 config[CONF_CLIMATE],
                 *config[CONF_PERSONS],
@@ -210,29 +249,83 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
-        """Track serialized acknowledgement, override, and refresh work."""
+        """Admit an immutable event and ensure one ordered worker is running."""
         if not self._accepting_events:
             return
-        task = self.hass.async_create_task(self._async_handle_state_change(event))
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        entity_id = event.data.get("entity_id")
+        old_state = old_state if isinstance(old_state, State) else None
+        new_state = new_state if isinstance(new_state, State) else None
+        transition_probe = _CapturedEvent(
+            entity_id=entity_id,
+            old_state=old_state,
+            new_state=new_state,
+            policy_transition=False,
+        )
+        captured = _CapturedEvent(
+            entity_id=entity_id,
+            old_state=old_state,
+            new_state=new_state,
+            policy_transition=self._event_changes_policy(transition_probe),
+        )
+        self._event_queue.append(captured)
+        if self._event_worker is not None and not self._event_worker.done():
+            return
+        self._event_worker = None
+        task = self.hass.async_create_task(self._async_event_worker())
+        self._event_worker = task
         self._event_tasks.add(task)
-        task.add_done_callback(self._event_tasks.discard)
+        task.add_done_callback(self._event_worker_done)
 
-    async def _async_handle_state_change(self, event: Event) -> None:
-        """Classify climate changes before refreshing the policy snapshot."""
-        async with self._event_lock:
-            if self._shutting_down:
+    @callback
+    def _event_worker_done(self, task: asyncio.Task[Any]) -> None:
+        """Retrieve worker errors and restart only for newly admitted work."""
+        self._event_tasks.discard(task)
+        if self._event_worker is task:
+            self._event_worker = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.exception("Unexpected state-event reconciliation failure")
+        if self._event_queue and self._accepting_events and self._event_worker is None:
+            replacement = self.hass.async_create_task(self._async_event_worker())
+            self._event_worker = replacement
+            self._event_tasks.add(replacement)
+            replacement.add_done_callback(self._event_worker_done)
+
+    async def _async_event_worker(self) -> None:
+        """Classify each admitted event in order, then reconcile final state once."""
+        while True:
+            while self._event_queue:
+                await self._async_classify_event(self._event_queue.popleft())
+            if self._clear_override_for_event:
+                self._clear_override_for_event = False
+                self._set_manual_override(None, None)
+                await self._async_try_save_override()
+            await self.async_refresh()
+            if not self._event_queue:
                 return
-            new_state = event.data.get("new_state")
-            old_state = event.data.get("old_state")
-            if isinstance(new_state, State) and new_state.entity_id == self.config[CONF_CLIMATE]:
-                await self._async_handle_climate_change(old_state, new_state)
-            if not self._shutting_down:
-                await self.async_request_refresh()
+
+    async def _async_classify_event(self, event: _CapturedEvent) -> None:
+        """Classify command echoes and event-ordered policy transitions."""
+        if event.policy_transition:
+            self._clear_override_for_event = True
+        if event.entity_id == self.config[CONF_CLIMATE] and event.new_state is not None:
+            await self._async_handle_climate_change(event.old_state, event.new_state)
 
     async def _async_handle_climate_change(self, old_state: State | None, new_state: State) -> None:
         """Consume command acknowledgements or persist an external target."""
-        if self.pending_hvac_mode == new_state.state:
-            self.pending_hvac_mode = None
+        mode_record = self._matching_command_record(
+            self._hvac_command_records,
+            new_state.state,
+            new_state,
+            target=False,
+        )
+        if mode_record is not None:
+            self._retire_command_record(self._hvac_command_records, mode_record)
 
         new_target = _finite_float(new_state.attributes.get(ATTR_TEMPERATURE))
         old_target = (
@@ -240,16 +333,20 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             if isinstance(old_state, State)
             else None
         )
-        if self.pending_target is not None:
-            if _targets_match(new_state, new_target, self.pending_target):
-                self.pending_target = None
-                return
-            if (
-                old_target is not None
-                and new_target is not None
-                and not _targets_match(new_state, old_target, new_target)
+        target_record = self._matching_command_record(
+            self._target_command_records,
+            new_target,
+            new_state,
+            target=True,
+        )
+        if target_record is not None:
+            self._retire_command_record(self._target_command_records, target_record)
+            manual_target = self.persistent_state.manual_override_target
+            if manual_target is not None and not _targets_match(
+                new_state, new_target, manual_target
             ):
-                self.pending_target = None
+                self._stale_own_target_echo = True
+            return
 
         if (
             new_target is None
@@ -270,10 +367,102 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             and self.persistent_state.manual_override_fingerprint == fingerprint
         ):
             return
-        self.persistent_state.manual_override_target = new_target
+        self._set_manual_override(new_target, fingerprint)
+        await self._async_try_save_override()
+
+    def _new_command_record(self, value: str | float) -> _CommandRecord:
+        """Create fresh bounded command provenance."""
+        self._command_generation += 1
+        return _CommandRecord(
+            value=value,
+            issued_at=dt_util.utcnow(),
+            issued_monotonic=time.monotonic(),
+            generation=self._command_generation,
+            context=Context(),
+        )
+
+    def _prune_command_records(self, records: deque[_CommandRecord]) -> None:
+        """Expire command provenance that can no longer be a credible echo."""
+        cutoff = time.monotonic() - _COMMAND_RECORD_TTL_SECONDS
+        while records and records[0].issued_monotonic < cutoff:
+            records.popleft()
+        self._sync_pending_views()
+
+    def _matching_command_record(
+        self,
+        records: deque[_CommandRecord],
+        value: object,
+        state: State,
+        *,
+        target: bool,
+    ) -> _CommandRecord | None:
+        """Return any live record matching context or normalized command value."""
+        self._prune_command_records(records)
+        for record in records:
+            if state.context.id == record.context.id:
+                return record
+        for record in records:
+            if target:
+                if _targets_match(state, value, record.value):
+                    return record
+            elif value == record.value:
+                return record
+        return None
+
+    def _retire_command_record(
+        self, records: deque[_CommandRecord], record: _CommandRecord
+    ) -> None:
+        """Retire acknowledged or failed provenance and update compatibility views."""
+        try:
+            records.remove(record)
+        except ValueError:
+            pass
+        self._sync_pending_views()
+
+    def _sync_pending_views(self) -> None:
+        """Expose the newest live command through legacy scalar attributes."""
+        self.pending_target = (
+            float(self._target_command_records[-1].value) if self._target_command_records else None
+        )
+        self.pending_hvac_mode = (
+            str(self._hvac_command_records[-1].value) if self._hvac_command_records else None
+        )
+
+    def _set_manual_override(
+        self,
+        target: float | None,
+        fingerprint: tuple[JsonPrimitive, ...] | None,
+    ) -> bool:
+        """Mutate manual override state and mark the durable snapshot dirty."""
+        if (
+            self.persistent_state.manual_override_target == target
+            and self.persistent_state.manual_override_fingerprint == fingerprint
+        ):
+            return False
+        self.persistent_state.manual_override_target = target
         self.persistent_state.manual_override_fingerprint = fingerprint
-        if not self._shutting_down:
+        self._override_revision += 1
+        self._override_dirty = True
+        return True
+
+    async def _async_try_save_override(self) -> bool:
+        """Attempt one dirty override save without losing retry state."""
+        if not self._override_dirty:
+            return True
+        revision = self._override_revision
+        try:
             await self.store.async_save(self.persistent_state)
+        except Exception:
+            _LOGGER.exception("Failed persisting manual thermostat override")
+            return False
+        if revision == self._override_revision:
+            self._override_dirty = False
+        return True
+
+    async def _async_ensure_override_saved(self) -> None:
+        """Block publication and climate writes until dirty state is durable."""
+        if self._override_dirty and not await self._async_try_save_override():
+            raise UpdateFailed("Manual thermostat override could not be persisted")
 
     @callback
     def async_update_listeners(self) -> None:
@@ -302,7 +491,65 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     def _available(state: State | None) -> bool:
         return state is not None and state.state not in _INVALID_STATE_VALUES
 
-    def _occupied(self) -> bool:
+    def _event_changes_policy(self, event: _CapturedEvent) -> bool:
+        """Detect a meaningful policy transition from the event payload itself."""
+        old_state = event.old_state
+        new_state = event.new_state
+        if old_state is None or new_state is None or old_state == new_state:
+            return False
+        config = self.config
+        entity_id = event.entity_id
+        if entity_id == config[CONF_SCHEDULE]:
+            return (old_state.state == "on") != (new_state.state == "on")
+        if entity_id in config[CONF_PERSONS]:
+            old_people = dict(self._admitted_person_states)
+            old_people[entity_id] = old_state
+            new_people = dict(old_people)
+            new_people[entity_id] = new_state
+            self._admitted_person_states = new_people
+            return self._occupied(old_people) != self._occupied(new_people)
+        if entity_id == config[CONF_DESTINATION]:
+            return self._journey_home(old_state) != self._journey_home(new_state)
+        if entity_id == config.get(CONF_ARRIVAL_TIME):
+            now = dt_util.utcnow()
+            return self._preheat_ready(old_state, now) != self._preheat_ready(new_state, now)
+        return entity_id == config[CONF_HOME_ZONE]
+
+    def _journey_home(self, destination: State | None) -> bool:
+        """Resolve whether a supplied destination state means home."""
+        zone = self.hass.states.get(self.config[CONF_HOME_ZONE])
+        if not self._available(destination) or zone is None:
+            return False
+        assert destination is not None
+        return destination_is_home(
+            destination.state,
+            self.config[CONF_HOME_ZONE],
+            zone.attributes.get(ATTR_FRIENDLY_NAME),
+            self.settings.destination_home_override,
+        )
+
+    def _preheat_ready(self, eta: State | None, now: datetime) -> bool:
+        """Resolve ETA readiness for one event payload at admission time."""
+        if not self._journey_home(self.hass.states.get(self.config[CONF_DESTINATION])):
+            return False
+        climate = self._climate_state()
+        current_temperature = (
+            _finite_float(climate.attributes.get(ATTR_CURRENT_TEMPERATURE))
+            if self._available(climate) and climate is not None
+            else None
+        )
+        settings = self.settings
+        warmup_minutes = self.learner.warmup_minutes(
+            current_temperature,
+            settings.high_temperature,
+            settings.fallback_warmup_minutes,
+            settings.maximum_warmup_minutes,
+        )
+        raw_eta = eta.state if self._available(eta) and eta is not None else None
+        local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
+        return preheat_timing(raw_eta, now, int(warmup_minutes), local_tz).ready
+
+    def _occupied(self, substitutions: dict[str, State | None] | None = None) -> bool:
         """Resolve occupancy with coordinates, names, and conservative fallbacks."""
         config = self.config
         zone = self.hass.states.get(config[CONF_HOME_ZONE])
@@ -321,7 +568,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
         any_valid = False
         for entity_id in config[CONF_PERSONS]:
-            person = self.hass.states.get(entity_id)
+            person = (
+                substitutions[entity_id]
+                if substitutions is not None and entity_id in substitutions
+                else self.hass.states.get(entity_id)
+            )
             if not self._available(person):
                 continue
             assert person is not None
@@ -358,6 +609,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         """Build one snapshot, publish it, then safely apply its command intent."""
         if self._shutting_down and self.data is not None:
             return self.data
+        await self._async_ensure_override_saved()
         now = dt_util.utcnow()
         config = self.config
         settings = self.settings
@@ -396,17 +648,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         occupied = self._occupied()
         schedule = self.hass.states.get(config[CONF_SCHEDULE])
         schedule_high = schedule is not None and schedule.state == "on"
-        zone = self.hass.states.get(config[CONF_HOME_ZONE])
         destination = self.hass.states.get(config[CONF_DESTINATION])
-        journey_home = False
-        if self._available(destination) and zone is not None:
-            assert destination is not None
-            journey_home = destination_is_home(
-                destination.state,
-                config[CONF_HOME_ZONE],
-                zone.attributes.get(ATTR_FRIENDLY_NAME),
-                settings.destination_home_override,
-            )
+        journey_home = self._journey_home(destination)
 
         arrival = None
         start = None
@@ -439,19 +682,21 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             settings.eco_temperature,
             settings.active_hvac_mode,
         )
+        preserve_stale_echo = False
         if self.persistent_state.manual_override_target is not None and thermostat_available:
             assert climate is not None
-            if (
-                not _targets_match(
-                    climate,
-                    current_target,
-                    self.persistent_state.manual_override_target,
-                )
-                or self.persistent_state.manual_override_fingerprint != fingerprint
-            ):
-                self.persistent_state.manual_override_target = None
-                self.persistent_state.manual_override_fingerprint = None
-                await self.store.async_save(self.persistent_state)
+            target_matches = _targets_match(
+                climate,
+                current_target,
+                self.persistent_state.manual_override_target,
+            )
+            fingerprint_matches = self.persistent_state.manual_override_fingerprint == fingerprint
+            preserve_stale_echo = (
+                self._stale_own_target_echo and not target_matches and fingerprint_matches
+            )
+            if (not target_matches or not fingerprint_matches) and not preserve_stale_echo:
+                self._set_manual_override(None, None)
+                await self._async_ensure_override_saved()
         self._last_policy_fingerprint = fingerprint
 
         result = evaluate_policy(
@@ -485,6 +730,15 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             self.async_set_updated_data(state)
             self._skip_duplicate_listener_update = True
         await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
+        if (
+            preserve_stale_echo
+            and climate is not None
+            and self.persistent_state.manual_override_target is not None
+        ):
+            await self._async_apply_target_command(
+                climate, self.persistent_state.manual_override_target
+            )
+        self._stale_own_target_echo = False
         return state
 
     async def _async_apply_commands(
@@ -501,56 +755,77 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         entity_id = self.config[CONF_CLIMATE]
         if climate.state != desired_mode:
-            self.pending_hvac_mode = desired_mode
+            self._prune_command_records(self._hvac_command_records)
+            mode_record = self._new_command_record(desired_mode)
+            self._hvac_command_records.append(mode_record)
+            self._sync_pending_views()
             try:
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
                     "set_hvac_mode",
                     {"entity_id": entity_id, "hvac_mode": desired_mode},
                     blocking=True,
+                    context=mode_record.context,
                 )
             except HomeAssistantError as err:
-                self.pending_hvac_mode = None
+                self._retire_command_record(self._hvac_command_records, mode_record)
                 _LOGGER.error("Failed setting HVAC mode for %s: %s", entity_id, err)
+            except BaseException:
+                self._retire_command_record(self._hvac_command_records, mode_record)
+                raise
 
         if self._shutting_down or desired_mode == HVACMode.OFF or desired_target is None:
+            return
+        await self._async_apply_target_command(climate, desired_target)
+
+    async def _async_apply_target_command(self, climate: State, desired_target: float) -> None:
+        """Write one target with bounded provenance when it differs from live state."""
+        if self._shutting_down or self.hass.state is not CoreState.running:
             return
         target = _finite_float(desired_target)
         current_target = _finite_float(climate.attributes.get(ATTR_TEMPERATURE))
         if target is None or _targets_match(climate, target, current_target):
             return
-        self.pending_target = target
+        entity_id = self.config[CONF_CLIMATE]
+        self._prune_command_records(self._target_command_records)
+        target_record = self._new_command_record(target)
+        self._target_command_records.append(target_record)
+        self._sync_pending_views()
         try:
             await self.hass.services.async_call(
                 CLIMATE_DOMAIN,
                 "set_temperature",
                 {"entity_id": entity_id, ATTR_TEMPERATURE: target},
                 blocking=True,
+                context=target_record.context,
             )
         except HomeAssistantError as err:
-            self.pending_target = None
+            self._retire_command_record(self._target_command_records, target_record)
             _LOGGER.error("Failed setting target temperature for %s: %s", entity_id, err)
+        except BaseException:
+            self._retire_command_record(self._target_command_records, target_record)
+            raise
 
     async def async_set_auto_mode(self, enabled: bool) -> None:
         """Persist strict Auto mode and immediately re-evaluate."""
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
         self.persistent_state.auto_mode = enabled
-        self.persistent_state.manual_override_target = None
-        self.persistent_state.manual_override_fingerprint = None
+        self._set_manual_override(None, None)
         if not enabled:
             self.persistent_state.blast_until = None
         await self.store.async_save(self.persistent_state)
+        self._override_dirty = False
         await self.async_refresh()
 
     async def async_start_blast(self) -> bool:
         """Start or restart the fixed-duration heat blast."""
         if not self.persistent_state.auto_mode:
             return False
-        self.persistent_state.manual_override_target = None
-        self.persistent_state.manual_override_fingerprint = None
+        self._set_manual_override(None, None)
         self.persistent_state.blast_until = dt_util.utcnow() + timedelta(minutes=HEAT_BLAST_MINUTES)
         await self.store.async_save(self.persistent_state)
+        self._override_dirty = False
         await self.async_refresh()
         return True
 
@@ -577,9 +852,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         if errors or normalized is None:
             raise HomeAssistantError(f"Invalid setting: {next(iter(errors.values()))}")
         options = dict(self.entry.options) | normalized
-        self.persistent_state.manual_override_target = None
-        self.persistent_state.manual_override_fingerprint = None
+        self._set_manual_override(None, None)
         await self.store.async_save(self.persistent_state)
+        self._override_dirty = False
         updated = self.hass.config_entries.async_update_entry(self.entry, options=options)
         if not updated:
             await self.async_refresh()
