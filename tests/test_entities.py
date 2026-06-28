@@ -389,7 +389,7 @@ async def test_dynamic_sensor_availability_and_status_details(hass, controller) 
     status = hass.states.get(status_id)
     assert status is not None
     assert status.state == ControllerStatus.MANUAL_OVERRIDE
-    assert status.attributes["manual_override"] == 18.5
+    assert status.attributes["manual_override"] is True
     assert status.attributes["learned_heating_rate"] == 1.25
     assert status.attributes["arrival_time"] == arrival
     assert status.attributes["preheat_start_time"] == start

@@ -80,7 +80,7 @@ class ControllerStatusSensor(ControllerEntity, SensorEntity):
             "current_temperature": data.current_temperature,
             "effective_target_temperature": data.result.target_temperature,
             "learned_heating_rate": data.learned_rate,
-            "manual_override": self.coordinator.persistent_state.manual_override_target,
+            "manual_override": (True if data.status is ControllerStatus.MANUAL_OVERRIDE else None),
             "arrival_time": data.arrival_time,
             "preheat_start_time": data.preheat_start_time,
         }
