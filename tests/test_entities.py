@@ -351,6 +351,71 @@ async def test_temperature_numbers_render_safely_with_malformed_capabilities(
         assert state.attributes[ATTR_MAX] >= 20.0
 
 
+async def test_temperature_number_metadata_tracks_runtime_capability_transitions(
+    hass, controller
+) -> None:
+    """Capability-only climate changes invalidate and restore number metadata."""
+    entry, _coordinator = controller
+    climate = hass.states.get("climate.hallway")
+    assert climate is not None
+    high_entity = _entity_id(hass, entry, "number", CONF_HIGH_TEMP)
+
+    malformed_attributes = dict(climate.attributes) | {"min_temp": "cold"}
+    hass.states.async_set(climate.entity_id, climate.state, malformed_attributes)
+    await hass.async_block_till_done()
+
+    malformed = hass.states.get(high_entity)
+    assert malformed is not None
+    assert malformed.state == "unavailable"
+    assert malformed.attributes[ATTR_MIN] <= 14.0
+    assert malformed.attributes[ATTR_MAX] >= 20.0
+
+    restored_attributes = dict(climate.attributes) | {
+        "min_temp": 50.0,
+        "max_temp": 90.0,
+        "target_temp_step": 1.0,
+        ATTR_UNIT_OF_MEASUREMENT: UnitOfTemperature.FAHRENHEIT,
+    }
+    hass.states.async_set(climate.entity_id, climate.state, restored_attributes)
+    await hass.async_block_till_done()
+
+    restored = hass.states.get(high_entity)
+    assert restored is not None
+    assert restored.state != "unavailable"
+    assert restored.attributes[ATTR_MIN] == 10.0
+    assert restored.attributes[ATTR_MAX] == 32.3
+    assert restored.attributes[ATTR_STEP] == 1.0
+    assert restored.attributes[ATTR_UNIT_OF_MEASUREMENT] == UnitOfTemperature.CELSIUS
+
+    invalid_unit_attributes = restored_attributes | {ATTR_UNIT_OF_MEASUREMENT: "degrees-ish"}
+    hass.states.async_set(climate.entity_id, climate.state, invalid_unit_attributes)
+    await hass.async_block_till_done()
+
+    invalid_unit = hass.states.get(high_entity)
+    assert invalid_unit is not None
+    assert invalid_unit.state == "unavailable"
+    assert invalid_unit.attributes[ATTR_UNIT_OF_MEASUREMENT] == UnitOfTemperature.CELSIUS
+
+
+async def test_invalid_thermostat_temperature_unit_is_never_published(
+    hass, controller_factory
+) -> None:
+    """Malformed thermostat units make temperature controls safely unavailable."""
+    entry, _coordinator = await controller_factory(
+        climate_overrides={ATTR_UNIT_OF_MEASUREMENT: "degrees-ish"}
+    )
+
+    for key in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
+        state = hass.states.get(_entity_id(hass, entry, "number", key))
+        assert state is not None
+        assert state.state == "unavailable"
+        assert state.attributes[ATTR_UNIT_OF_MEASUREMENT] != "degrees-ish"
+
+    target = hass.states.get(_entity_id(hass, entry, "sensor", "effective_target_temperature"))
+    assert target is not None
+    assert target.attributes[ATTR_UNIT_OF_MEASUREMENT] == UnitOfTemperature.CELSIUS
+
+
 async def test_auto_and_heat_blast_services(hass, controller) -> None:
     """Auto immediately re-evaluates and Heat Blast remains safely pressable."""
     entry, coordinator = controller

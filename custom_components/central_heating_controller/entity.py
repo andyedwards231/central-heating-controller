@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
+from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CLIMATE, DOMAIN, NAME
+from .const import DOMAIN, NAME
 from .coordinator import ControllerCoordinator
 
 
@@ -35,9 +35,8 @@ class ControllerEntity(CoordinatorEntity[ControllerCoordinator]):
     @property
     def thermostat_temperature_unit(self) -> str:
         """Return the selected thermostat's native temperature unit."""
-        climate = self.coordinator.hass.states.get(self.coordinator.config[CONF_CLIMATE])
-        if climate is not None:
-            unit = climate.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
-            if isinstance(unit, str) and unit:
-                return unit
-        return self.coordinator.hass.config.units.temperature_unit
+        capabilities = self.coordinator.data.temperature_capabilities
+        if capabilities is not None:
+            return capabilities.unit
+        fallback = self.coordinator.hass.config.units.temperature_unit
+        return fallback if fallback in UnitOfTemperature else UnitOfTemperature.CELSIUS

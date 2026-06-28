@@ -85,6 +85,16 @@ class PersistentState:
 
 
 @dataclass(frozen=True)
+class TemperatureCapabilities:
+    """Validated thermostat metadata published for entity consumers."""
+
+    minimum: float
+    maximum: float
+    step: float | None
+    unit: str
+
+
+@dataclass(frozen=True)
 class ControllerState:
     """Immutable state published by the coordinator after each evaluation.
 
@@ -99,6 +109,7 @@ class ControllerState:
     arrival_time: datetime | None
     preheat_start_time: datetime | None
     warmup_minutes: float | int
+    temperature_capabilities: TemperatureCapabilities | None = None
 
     @property
     def status(self) -> ControllerStatus:

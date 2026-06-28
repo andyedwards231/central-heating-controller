@@ -27,8 +27,10 @@ from homeassistant.const import (
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
     ATTR_TEMPERATURE,
+    ATTR_UNIT_OF_MEASUREMENT,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
+    UnitOfTemperature,
 )
 from homeassistant.core import (
     EVENT_HOMEASSISTANT_STARTED,
@@ -70,6 +72,7 @@ from .models import (
     ControllerState,
     JsonPrimitive,
     PersistentState,
+    TemperatureCapabilities,
 )
 from .policy import evaluate_policy
 from .storage import ControllerStore
@@ -90,6 +93,7 @@ _COMMAND_RECORD_LIMIT = 16
 _COMMAND_RECORD_TTL_SECONDS = 300
 _COMMAND_ACK_WINDOW_SECONDS = 10
 _EVENT_CLASSIFICATION_RETRY_LIMIT = 2
+_VALID_TEMPERATURE_UNITS = frozenset(unit.value for unit in UnitOfTemperature)
 
 
 class _CommandMatchStrength(StrEnum):
@@ -160,6 +164,33 @@ def _targets_match(climate: State, first: object, second: object) -> bool:
         first_target is not None
         and second_target is not None
         and abs(first_target - second_target) <= _target_tolerance(climate)
+    )
+
+
+def _temperature_capabilities(
+    climate: State,
+    fallback_unit: str,
+) -> TemperatureCapabilities | None:
+    """Return validated thermostat metadata with a safe native unit."""
+    capabilities, error = _climate_capabilities(climate)
+    if error is not None or capabilities is None:
+        return None
+
+    raw_unit = climate.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+    if raw_unit is None:
+        unit = fallback_unit
+    elif isinstance(raw_unit, str) and raw_unit in _VALID_TEMPERATURE_UNITS:
+        unit = raw_unit
+    else:
+        return None
+    if unit not in _VALID_TEMPERATURE_UNITS:
+        unit = UnitOfTemperature.CELSIUS
+
+    return TemperatureCapabilities(
+        minimum=capabilities.min_temp,
+        maximum=capabilities.max_temp,
+        step=capabilities.temp_step,
+        unit=unit,
     )
 
 
@@ -702,6 +733,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             if thermostat_available and climate is not None
             else None
         )
+        temperature_capabilities = (
+            _temperature_capabilities(climate, self.hass.config.units.temperature_unit)
+            if thermostat_available and climate is not None
+            else None
+        )
 
         learned = None
         if thermostat_available and climate is not None:
@@ -811,6 +847,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             arrival_time=arrival,
             preheat_start_time=start,
             warmup_minutes=warmup_minutes,
+            temperature_capabilities=temperature_capabilities,
         )
         if state != self.data:
             self.async_set_updated_data(state)

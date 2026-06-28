@@ -9,14 +9,12 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberEntityDescription,
 )
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTime
+from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import CentralHeatingConfigEntry
-from .config_flow import _ClimateCapabilities, _climate_capabilities
 from .const import (
-    CONF_CLIMATE,
     CONF_ECO_TEMP,
     CONF_FALLBACK_MINUTES,
     CONF_HIGH_TEMP,
@@ -25,6 +23,7 @@ from .const import (
 )
 from .coordinator import ControllerCoordinator
 from .entity import ControllerEntity
+from .models import TemperatureCapabilities
 
 TEMPERATURE_KEYS = frozenset({CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP})
 
@@ -116,7 +115,7 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
             return self.entity_description.native_min_value
         capabilities = self._temperature_capabilities
         if capabilities is not None:
-            return capabilities.min_temp
+            return capabilities.minimum
         return self._fallback_temperature_bounds[0]
 
     @property
@@ -127,7 +126,7 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
             return self.entity_description.native_max_value
         capabilities = self._temperature_capabilities
         if capabilities is not None:
-            return capabilities.max_temp
+            return capabilities.maximum
         return self._fallback_temperature_bounds[1]
 
     @property
@@ -137,7 +136,7 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
             assert self.entity_description.native_step is not None
             return self.entity_description.native_step
         capabilities = self._temperature_capabilities
-        return capabilities.temp_step if capabilities is not None else None
+        return capabilities.step if capabilities is not None else None
 
     @property
     def available(self) -> bool:
@@ -147,13 +146,9 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
         )
 
     @property
-    def _temperature_capabilities(self) -> _ClimateCapabilities | None:
-        """Return validated live thermostat capabilities without raising."""
-        climate = self.coordinator.hass.states.get(self.coordinator.config[CONF_CLIMATE])
-        if climate is None or climate.state in {STATE_UNKNOWN, STATE_UNAVAILABLE}:
-            return None
-        capabilities, error = _climate_capabilities(climate)
-        return capabilities if error is None else None
+    def _temperature_capabilities(self) -> TemperatureCapabilities | None:
+        """Return coordinator-published thermostat capabilities."""
+        return self.coordinator.data.temperature_capabilities
 
     @property
     def _fallback_temperature_bounds(self) -> tuple[float, float]:
