@@ -50,7 +50,13 @@ def destination_is_home(
 
 def _valid_timezone(value: object) -> bool:
     """Return whether a value can be used as a datetime timezone."""
-    return isinstance(value, tzinfo)
+    if not isinstance(value, tzinfo):
+        return False
+    try:
+        probe = datetime(2000, 1, 1, tzinfo=value)
+        return probe.utcoffset() is not None
+    except Exception:
+        return False
 
 
 def parse_arrival_time(raw: object, local_tz: tzinfo | None) -> datetime | None:
@@ -89,7 +95,7 @@ def parse_arrival_time(raw: object, local_tz: tzinfo | None) -> datetime | None:
 
     try:
         return dt_util.as_utc(parsed)
-    except OverflowError, ValueError:
+    except Exception:
         return None
 
 

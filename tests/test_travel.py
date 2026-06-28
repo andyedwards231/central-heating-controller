@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,6 +10,19 @@ from custom_components.central_heating_controller.travel import (
     parse_arrival_time,
     preheat_timing,
 )
+
+
+class UnusableTimezone(tzinfo):
+    """Timezone implementation that cannot supply an offset."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        raise NotImplementedError
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        raise NotImplementedError
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        raise NotImplementedError
 
 
 @pytest.mark.parametrize("destination", ["home", "Home", "zone.home", "My_Home", "my home"])
@@ -84,6 +98,16 @@ def test_naive_arrival_without_a_valid_local_timezone_is_rejected() -> None:
     assert parse_arrival_time("2026-01-01T12:30:00", None) is None
 
 
+def test_naive_arrival_with_unusable_local_timezone_returns_none() -> None:
+    assert parse_arrival_time("2026-01-01T12:30:00", UnusableTimezone()) is None
+
+
+def test_zoneinfo_timezone_remains_supported() -> None:
+    assert parse_arrival_time("2026-06-01T12:30:00", ZoneInfo("Europe/London")) == datetime(
+        2026, 6, 1, 11, 30, tzinfo=timezone.utc
+    )
+
+
 def test_bad_or_past_arrival_means_immediate_preheat() -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     timing = preheat_timing("unavailable", now, warmup_minutes=60, local_tz=timezone.utc)
@@ -147,6 +171,17 @@ def test_invalid_local_timezone_is_rejected() -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="local_tz"):
         preheat_timing("2026-01-01T14:00:00+00:00", now, 60, None)
+
+
+def test_unusable_local_timezone_is_rejected_before_calculations() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="local_tz"):
+        preheat_timing(
+            "2026-01-01T14:00:00+00:00",
+            now,
+            60,
+            UnusableTimezone(),
+        )
 
 
 def test_preheat_timing_is_frozen() -> None:
