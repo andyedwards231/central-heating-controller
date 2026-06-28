@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -37,9 +38,10 @@ def test_rejects_short_falling_target_reached_and_implausible_windows() -> None:
 def test_warmup_uses_fallback_until_trusted_then_clamps_model() -> None:
     learner = HeatingRateLearner(rate=1.0, sample_count=2)
     assert learner.warmup_minutes(16.0, 20.0, 60, 180) == 60
-    learner.sample_count = 3
-    assert learner.warmup_minutes(16.0, 20.0, 60, 180) == 180
-    assert learner.warmup_minutes(20.0, 20.0, 60, 180) == 0
+
+    trusted_learner = HeatingRateLearner(rate=1.0, sample_count=3)
+    assert trusted_learner.warmup_minutes(16.0, 20.0, 60, 180) == 180
+    assert trusted_learner.warmup_minutes(20.0, 20.0, 60, 180) == 0
 
 
 def test_accepts_exactly_fifteen_minutes_and_returns_smoothed_rate() -> None:
@@ -63,6 +65,26 @@ def test_frequent_updates_keep_original_baseline() -> None:
         2.0
     )
     assert learner.sample_count == 1
+
+
+def test_intermediate_temperature_decrease_resets_the_window() -> None:
+    learner = HeatingRateLearner()
+    learner.observe(NOW, 18.0, 21.0, heating=True)
+    learner.observe(NOW + timedelta(minutes=5), 18.5, 21.0, heating=True)
+    learner.observe(NOW + timedelta(minutes=10), 18.2, 21.0, heating=True)
+
+    assert learner.observe(NOW + timedelta(minutes=15), 18.6, 21.0, heating=True) is None
+    assert learner.sample_count == 0
+
+
+def test_flat_intermediate_temperature_keeps_the_original_baseline() -> None:
+    learner = HeatingRateLearner()
+    learner.observe(NOW, 18.0, 21.0, heating=True)
+    learner.observe(NOW + timedelta(minutes=5), 18.0, 21.0, heating=True)
+
+    assert learner.observe(NOW + timedelta(minutes=15), 18.5, 21.0, heating=True) == pytest.approx(
+        2.0
+    )
 
 
 def test_stopped_heating_resets_the_window() -> None:
@@ -145,6 +167,50 @@ def test_timestamp_regression_against_latest_observation_resets_the_window() -> 
 
 
 @pytest.mark.parametrize(
+    "start_utc",
+    [
+        datetime(2026, 3, 29, 0, 55, tzinfo=timezone.utc),
+        datetime(2026, 10, 25, 0, 55, tzinfo=timezone.utc),
+    ],
+    ids=["spring-forward", "fall-back"],
+)
+def test_dst_transitions_measure_fifteen_real_minutes(start_utc: datetime) -> None:
+    london = ZoneInfo("Europe/London")
+    learner = HeatingRateLearner()
+    learner.observe(start_utc.astimezone(london), 18.0, 21.0, heating=True)
+
+    accepted_rate = learner.observe(
+        (start_utc + timedelta(minutes=15)).astimezone(london),
+        18.5,
+        21.0,
+        heating=True,
+    )
+
+    assert accepted_rate == pytest.approx(2.0)
+
+
+def test_unusable_timezone_resets_without_raising() -> None:
+    class UnusableTimezone(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta | None:
+            raise TypeError("unusable timezone")
+
+    learner = HeatingRateLearner()
+    learner.observe(NOW, 18.0, 21.0, heating=True)
+
+    assert (
+        learner.observe(
+            datetime(2026, 1, 1, 0, 5, tzinfo=UnusableTimezone()),
+            18.2,
+            21.0,
+            heating=True,
+        )
+        is None
+    )
+    assert learner.observe(NOW + timedelta(minutes=15), 18.5, 21.0, heating=True) is None
+    assert learner.sample_count == 0
+
+
+@pytest.mark.parametrize(
     ("rate", "sample_count"),
     [
         (None, 1),
@@ -152,6 +218,7 @@ def test_timestamp_regression_against_latest_observation_resets_the_window() -> 
         (-1.0, 1),
         (float("nan"), 1),
         (float("inf"), 1),
+        (10.0001, 1),
         (1.0, -1),
         (1.0, 1.5),
         (1.0, True),
@@ -165,6 +232,44 @@ def test_invalid_initial_state_normalizes_to_empty(rate: float | None, sample_co
     assert learner.sample_count == 0
     assert learner.trusted is False
     assert learner.to_dict() == {"rate": None, "sample_count": 0}
+
+
+def test_huge_numeric_inputs_do_not_escape_validation() -> None:
+    huge = 10**1000
+    learner = HeatingRateLearner(rate=huge, sample_count=1)
+    assert learner.to_dict() == {"rate": None, "sample_count": 0}
+
+    learner.observe(NOW, 18.0, 21.0, heating=True)
+    assert learner.observe(NOW + timedelta(minutes=5), huge, huge + 1, heating=True) is None
+    assert learner.observe(NOW + timedelta(minutes=15), 18.5, 21.0, heating=True) is None
+    assert learner.warmup_minutes(huge, 20.0, 60, 180) == 60
+    assert learner.warmup_minutes(18.0, 20.0, huge, huge) == huge
+
+
+def test_persisted_rate_accepts_the_upper_boundary() -> None:
+    learner = HeatingRateLearner(rate=10.0, sample_count=1)
+
+    assert learner.to_dict() == {"rate": 10.0, "sample_count": 1}
+
+
+def test_learned_state_is_read_only_and_remains_usable_after_assignment_attempts() -> None:
+    learner = HeatingRateLearner(rate=1.0, sample_count=3)
+
+    with pytest.raises(AttributeError):
+        learner.rate = float("nan")
+    with pytest.raises(AttributeError):
+        learner.sample_count = -1
+
+    assert learner.to_dict() == {"rate": 1.0, "sample_count": 3}
+    assert accepted_sample(learner, 18.0, 19.0) == pytest.approx(1.3)
+    assert learner.to_dict() == {"rate": pytest.approx(1.3), "sample_count": 4}
+
+
+def test_tiny_persisted_rate_clamps_nonfinite_warmup_calculation() -> None:
+    learner = HeatingRateLearner(rate=5e-324, sample_count=3)
+
+    assert learner.warmup_minutes(-1e308, 1e308, 60, 180) == 180
+    assert learner.warmup_minutes(-(10**308), 10**308, 60, 180) == 180
 
 
 def test_reset_clears_learned_and_transient_state() -> None:
