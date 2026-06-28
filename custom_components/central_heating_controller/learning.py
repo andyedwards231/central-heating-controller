@@ -35,6 +35,7 @@ class HeatingRateLearner:
             self.rate = None
             self.sample_count = 0
         self._window_started_at: datetime | None = None
+        self._last_observed_at: datetime | None = None
         self._window_temperature: float | None = None
 
     @staticmethod
@@ -64,6 +65,7 @@ class HeatingRateLearner:
 
     def _reset_window(self) -> None:
         self._window_started_at = None
+        self._last_observed_at = None
         self._window_temperature = None
 
     def observe(
@@ -87,15 +89,17 @@ class HeatingRateLearner:
         current = float(current_temperature)
         if self._window_started_at is None:
             self._window_started_at = now
+            self._last_observed_at = now
             self._window_temperature = current
             return None
 
-        if now <= self._window_started_at:
+        if self._last_observed_at is None or now <= self._last_observed_at:
             self._reset_window()
             return None
 
         elapsed = now - self._window_started_at
         if elapsed < _MINIMUM_SAMPLE_DURATION:
+            self._last_observed_at = now
             return None
 
         baseline = self._window_temperature

@@ -134,6 +134,16 @@ def test_naive_and_non_monotonic_timestamps_reset_the_window() -> None:
     assert learner.sample_count == 0
 
 
+def test_timestamp_regression_against_latest_observation_resets_the_window() -> None:
+    learner = HeatingRateLearner()
+    learner.observe(NOW, 18.0, 21.0, heating=True)
+    learner.observe(NOW + timedelta(minutes=10), 18.2, 21.0, heating=True)
+    learner.observe(NOW + timedelta(minutes=5), 18.1, 21.0, heating=True)
+
+    assert learner.observe(NOW + timedelta(minutes=20), 18.5, 21.0, heating=True) is None
+    assert learner.sample_count == 0
+
+
 @pytest.mark.parametrize(
     ("rate", "sample_count"),
     [
