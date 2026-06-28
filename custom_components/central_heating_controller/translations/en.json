@@ -1,0 +1,95 @@
+{
+  "title": "Central Heating Controller",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Choose heating entities",
+        "description": "Select the thermostat and entities used to plan home heating.",
+        "data": {
+          "climate_entity": "Thermostat",
+          "person_entities": "People",
+          "home_zone_entity": "Home zone",
+          "schedule_entity": "Heating schedule",
+          "destination_entity": "Destination",
+          "arrival_time_entity": "Arrival time (optional)"
+        }
+      },
+      "settings": {
+        "title": "Configure heating",
+        "description": "Choose the temperatures and warm-up limits used by the controller.",
+        "data": {
+          "active_hvac_mode": "Active HVAC mode",
+          "high_temperature": "High temperature",
+          "low_temperature": "Low temperature",
+          "eco_temperature": "Eco temperature",
+          "fallback_warmup_minutes": "Fallback warm-up duration",
+          "maximum_warmup_minutes": "Maximum warm-up duration",
+          "destination_home_value": "Destination value meaning home (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This thermostat is already controlled by another Central Heating Controller entry."
+    },
+    "error": {
+      "entity_not_found": "The selected entity does not exist.",
+      "persons_required": "Select at least one person.",
+      "target_temperature_unsupported": "The thermostat does not support setting a target temperature.",
+      "invalid_climate": "The thermostat does not provide usable modes or temperature limits.",
+      "no_active_hvac_modes": "The thermostat has no active HVAC mode.",
+      "unsupported_hvac_mode": "Select an active HVAC mode supported by the thermostat.",
+      "temperature_out_of_range": "The temperature must be within the thermostat's supported range.",
+      "temperature_step": "The temperature must match the thermostat's supported step.",
+      "temperature_order": "High temperature must be at least low temperature, and low temperature must be at least eco temperature.",
+      "invalid_number": "Enter a finite number.",
+      "invalid_duration": "Enter a duration from 5 to 360 minutes in 5-minute increments.",
+      "warmup_order": "Fallback warm-up duration cannot exceed maximum warm-up duration.",
+      "already_configured": "This thermostat is already controlled by another Central Heating Controller entry."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Update heating entities",
+        "description": "Change the thermostat and entities used to plan home heating.",
+        "data": {
+          "climate_entity": "Thermostat",
+          "person_entities": "People",
+          "home_zone_entity": "Home zone",
+          "schedule_entity": "Heating schedule",
+          "destination_entity": "Destination",
+          "arrival_time_entity": "Arrival time (optional)"
+        }
+      },
+      "settings": {
+        "title": "Update heating settings",
+        "description": "Change control settings or request a one-time learning reset.",
+        "data": {
+          "active_hvac_mode": "Active HVAC mode",
+          "high_temperature": "High temperature",
+          "low_temperature": "Low temperature",
+          "eco_temperature": "Eco temperature",
+          "fallback_warmup_minutes": "Fallback warm-up duration",
+          "maximum_warmup_minutes": "Maximum warm-up duration",
+          "destination_home_value": "Destination value meaning home (optional)",
+          "reset_learning": "Reset learned heating rate"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "The selected entity does not exist.",
+      "persons_required": "Select at least one person.",
+      "target_temperature_unsupported": "The thermostat does not support setting a target temperature.",
+      "invalid_climate": "The thermostat does not provide usable modes or temperature limits.",
+      "no_active_hvac_modes": "The thermostat has no active HVAC mode.",
+      "unsupported_hvac_mode": "Select an active HVAC mode supported by the thermostat.",
+      "temperature_out_of_range": "The temperature must be within the thermostat's supported range.",
+      "temperature_step": "The temperature must match the thermostat's supported step.",
+      "temperature_order": "High temperature must be at least low temperature, and low temperature must be at least eco temperature.",
+      "invalid_number": "Enter a finite number.",
+      "invalid_duration": "Enter a duration from 5 to 360 minutes in 5-minute increments.",
+      "warmup_order": "Fallback warm-up duration cannot exceed maximum warm-up duration.",
+      "already_configured": "This thermostat is already controlled by another Central Heating Controller entry."
+    }
+  }
+}

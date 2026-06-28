@@ -19,6 +19,11 @@ CONF_LOW_TEMP = "low_temperature"
 CONF_ECO_TEMP = "eco_temperature"
 CONF_FALLBACK_MINUTES = "fallback_warmup_minutes"
 CONF_MAX_WARMUP_MINUTES = "maximum_warmup_minutes"
+CONF_RESET_LEARNING = "reset_learning"
+
+# Internal one-shot marker written by the options flow when the entry is unloaded.
+# The coordinator setup added in Task 6 consumes and removes this marker.
+OPT_RESET_LEARNING_REQUESTED = "_reset_learning_requested"
 
 DEFAULT_HIGH_C = 20.0
 DEFAULT_LOW_C = 17.0
