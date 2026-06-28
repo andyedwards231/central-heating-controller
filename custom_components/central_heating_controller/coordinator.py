@@ -75,6 +75,7 @@ from .models import (
     TemperatureCapabilities,
 )
 from .policy import evaluate_policy
+from .repairs import sync_missing_entity_issues
 from .storage import ControllerStore
 from .travel import destination_is_home, preheat_timing
 
@@ -722,6 +723,31 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         config = self.config
         settings = self.settings
         climate = self._climate_state()
+        person_states = {
+            entity_id: self.hass.states.get(entity_id)
+            for entity_id in config[CONF_PERSONS]
+        }
+        home_zone = self.hass.states.get(config[CONF_HOME_ZONE])
+        schedule = self.hass.states.get(config[CONF_SCHEDULE])
+        destination = self.hass.states.get(config[CONF_DESTINATION])
+        arrival_entity = config.get(CONF_ARRIVAL_TIME)
+        eta = self.hass.states.get(arrival_entity) if arrival_entity else None
+        missing_keys = {
+            key
+            for key, missing in (
+                (CONF_CLIMATE, climate is None),
+                (CONF_PERSONS, any(state is None for state in person_states.values())),
+                (CONF_HOME_ZONE, home_zone is None),
+                (CONF_SCHEDULE, schedule is None),
+                (CONF_DESTINATION, destination is None),
+                (
+                    CONF_ARRIVAL_TIME,
+                    bool(arrival_entity) and eta is None,
+                ),
+            )
+            if missing
+        }
+        sync_missing_entity_issues(self.hass, self.entry, missing_keys)
         thermostat_available = self._available(climate)
         current_temperature = (
             _finite_float(climate.attributes.get(ATTR_CURRENT_TEMPERATURE))
@@ -758,18 +784,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             settings.maximum_warmup_minutes,
         )
 
-        occupied = self._occupied()
-        schedule = self.hass.states.get(config[CONF_SCHEDULE])
+        occupied = self._occupied(person_states, home_zone)
         schedule_high = schedule is not None and schedule.state == "on"
-        destination = self.hass.states.get(config[CONF_DESTINATION])
-        journey_home = self._journey_home(destination)
+        journey_home = self._journey_home(destination, home_zone)
 
         arrival = None
         start = None
         preheat_ready = False
         if journey_home:
-            eta_entity = config.get(CONF_ARRIVAL_TIME)
-            eta = self.hass.states.get(eta_entity) if eta_entity else None
             raw_eta = eta.state if self._available(eta) and eta is not None else None
             local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
             timing = preheat_timing(raw_eta, now, int(warmup_minutes), local_tz)

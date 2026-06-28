@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context, CoreState, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
 
 from custom_components.central_heating_controller import (
     async_setup_entry,
@@ -63,7 +64,7 @@ async def cleanup_coordinators(hass):
         await coordinator.async_shutdown()
 
 
-def _entry(*, options: dict | None = None) -> MockConfigEntry:
+def _entry(*, data: dict | None = None, options: dict | None = None) -> MockConfigEntry:
     """Return a fully configured test entry."""
     return MockConfigEntry(
         domain=DOMAIN,
@@ -74,7 +75,8 @@ def _entry(*, options: dict | None = None) -> MockConfigEntry:
             CONF_SCHEDULE: "schedule.heating",
             CONF_DESTINATION: "sensor.destination",
             CONF_ARRIVAL_TIME: "sensor.eta",
-        },
+        }
+        | (data or {}),
         options={
             CONF_ACTIVE_HVAC_MODE: "heat",
             CONF_HIGH_TEMP: 20.0,
@@ -107,9 +109,11 @@ def _set_baseline_states(hass) -> None:
     hass.states.async_set("sensor.eta", "unknown")
 
 
-async def _setup_coordinator(hass, *, state: PersistentState | None = None, options=None):
+async def _setup_coordinator(
+    hass, *, data=None, state: PersistentState | None = None, options=None
+):
     """Create a coordinator with deterministic storage and service calls."""
-    entry = _entry(options=options)
+    entry = _entry(data=data, options=options)
     entry.add_to_hass(hass)
     coordinator = ControllerCoordinator(hass, entry)
     coordinator.store.async_load = AsyncMock(return_value=state or PersistentState())
@@ -320,6 +324,108 @@ async def test_unavailable_climate_publishes_without_commands(hass) -> None:
 
     assert coordinator.data.status is ControllerStatus.UNAVAILABLE
     hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("missing_entities", "person_state", "destination", "expected"),
+    [
+        (("zone.home",), "work", "work", ControllerStatus.HIGH),
+        (("person.andy", "person.alex"), "work", "work", ControllerStatus.HIGH),
+        (("schedule.heating",), "home", "work", ControllerStatus.LOW),
+        (("sensor.destination",), "work", "home", ControllerStatus.AWAY),
+        (("sensor.eta",), "work", "home", ControllerStatus.PREHEATING),
+    ],
+)
+async def test_missing_input_fallbacks(
+    hass, missing_entities, person_state, destination, expected
+) -> None:
+    """Missing inputs use the precise conservative control fallback."""
+    _set_baseline_states(hass)
+    hass.states.async_set("schedule.heating", "on")
+    hass.states.async_set("person.andy", person_state)
+    hass.states.async_set("person.alex", STATE_UNKNOWN)
+    hass.states.async_set("sensor.destination", destination)
+    hass.states.async_set("sensor.eta", "2026-06-28T17:30:00+00:00")
+    for entity_id in missing_entities:
+        hass.states.async_remove(entity_id)
+
+    coordinator, _ = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is expected
+
+
+async def test_missing_climate_commands_nothing_and_reports_unavailable(hass) -> None:
+    """A removed thermostat is unavailable and never receives commands."""
+    _set_baseline_states(hass)
+    hass.states.async_remove("climate.hallway")
+
+    coordinator, _ = await _setup_coordinator(hass)
+
+    assert coordinator.data.status is ControllerStatus.UNAVAILABLE
+    hass.services.async_call.assert_not_awaited()
+
+
+async def test_missing_entity_issues_are_created_and_deleted_without_ids(hass) -> None:
+    """Repairs identify human input labels and disappear when inputs recover."""
+    _set_baseline_states(hass)
+    for entity_id in (
+        "climate.hallway",
+        "person.andy",
+        "zone.home",
+        "schedule.heating",
+        "sensor.destination",
+        "sensor.eta",
+    ):
+        hass.states.async_remove(entity_id)
+
+    coordinator, entry = await _setup_coordinator(hass)
+    registry = ir.async_get(hass)
+    expected_keys = {
+        CONF_CLIMATE,
+        CONF_PERSONS,
+        CONF_HOME_ZONE,
+        CONF_SCHEDULE,
+        CONF_DESTINATION,
+        CONF_ARRIVAL_TIME,
+    }
+
+    for key in expected_keys:
+        issue = registry.async_get_issue(DOMAIN, f"{entry.entry_id}_{key}")
+        assert issue is not None
+        assert issue.severity is ir.IssueSeverity.WARNING
+        assert issue.is_fixable is False
+        assert issue.translation_key == "missing_entity"
+        assert issue.translation_placeholders is not None
+        placeholders = repr(issue.translation_placeholders)
+        assert "climate.hallway" not in placeholders
+        assert "person.andy" not in placeholders
+        assert "sensor.destination" not in placeholders
+        assert "sensor.eta" not in placeholders
+
+    _set_baseline_states(hass)
+    await coordinator.async_refresh()
+
+    for key in expected_keys:
+        assert registry.async_get_issue(DOMAIN, f"{entry.entry_id}_{key}") is None
+
+
+async def test_unconfigured_arrival_entity_never_creates_issue(hass) -> None:
+    """An omitted optional ETA input is not treated as a broken entity."""
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "work")
+    hass.states.async_set("person.alex", STATE_UNKNOWN)
+    hass.states.async_set("sensor.destination", "home")
+    data = {CONF_ARRIVAL_TIME: None}
+
+    coordinator, entry = await _setup_coordinator(hass, data=data)
+
+    assert coordinator.data.status is ControllerStatus.PREHEATING
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"{entry.entry_id}_{CONF_ARRIVAL_TIME}"
+        )
+        is None
+    )
 
 
 async def test_redundant_commands_are_suppressed_independently(hass) -> None:
