@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from homeassistant.components.climate import (
-    ATTR_MAX_TEMP,
-    ATTR_MIN_TEMP,
-    ATTR_TARGET_TEMP_STEP,
-)
+import math
+
 from homeassistant.components.number import (
     NumberDeviceClass,
     NumberEntity,
     NumberEntityDescription,
 )
-from homeassistant.const import UnitOfTime
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import CentralHeatingConfigEntry
+from .config_flow import _ClimateCapabilities, _climate_capabilities
 from .const import (
     CONF_CLIMATE,
     CONF_ECO_TEMP,
@@ -25,6 +23,7 @@ from .const import (
     CONF_LOW_TEMP,
     CONF_MAX_WARMUP_MINUTES,
 )
+from .coordinator import ControllerCoordinator
 from .entity import ControllerEntity
 
 TEMPERATURE_KEYS = frozenset({CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP})
@@ -86,7 +85,7 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
 
     def __init__(
         self,
-        coordinator,
+        coordinator: ControllerCoordinator,
         entry_id: str,
         description: NumberEntityDescription,
     ) -> None:
@@ -115,7 +114,10 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
         if not self._is_temperature:
             assert self.entity_description.native_min_value is not None
             return self.entity_description.native_min_value
-        return self._climate_number_attribute(ATTR_MIN_TEMP)
+        capabilities = self._temperature_capabilities
+        if capabilities is not None:
+            return capabilities.min_temp
+        return self._fallback_temperature_bounds[0]
 
     @property
     def native_max_value(self) -> float:
@@ -123,21 +125,61 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
         if not self._is_temperature:
             assert self.entity_description.native_max_value is not None
             return self.entity_description.native_max_value
-        return self._climate_number_attribute(ATTR_MAX_TEMP)
+        capabilities = self._temperature_capabilities
+        if capabilities is not None:
+            return capabilities.max_temp
+        return self._fallback_temperature_bounds[1]
 
     @property
-    def native_step(self) -> float:
+    def native_step(self) -> float | None:
         """Return the thermostat or duration step."""
         if not self._is_temperature:
             assert self.entity_description.native_step is not None
             return self.entity_description.native_step
-        return self._climate_number_attribute(ATTR_TARGET_TEMP_STEP)
+        capabilities = self._temperature_capabilities
+        return capabilities.temp_step if capabilities is not None else None
 
-    def _climate_number_attribute(self, attribute: str) -> float:
-        """Return a required numeric attribute from the selected thermostat."""
+    @property
+    def available(self) -> bool:
+        """Keep temperature controls unavailable without usable capabilities."""
+        return super().available and (
+            not self._is_temperature or self._temperature_capabilities is not None
+        )
+
+    @property
+    def _temperature_capabilities(self) -> _ClimateCapabilities | None:
+        """Return validated live thermostat capabilities without raising."""
         climate = self.coordinator.hass.states.get(self.coordinator.config[CONF_CLIMATE])
-        assert climate is not None
-        return float(climate.attributes[attribute])
+        if climate is None or climate.state in {STATE_UNKNOWN, STATE_UNAVAILABLE}:
+            return None
+        capabilities, error = _climate_capabilities(climate)
+        return capabilities if error is None else None
+
+    @property
+    def _fallback_temperature_bounds(self) -> tuple[float, float]:
+        """Return finite bounds containing all configured temperature values."""
+        values = []
+        settings = self.coordinator.settings
+        for value in (
+            settings.high_temperature,
+            settings.low_temperature,
+            settings.eco_temperature,
+        ):
+            if isinstance(value, bool):
+                continue
+            try:
+                converted = float(value)
+            except OverflowError, TypeError, ValueError:
+                continue
+            if math.isfinite(converted):
+                values.append(converted)
+        if not values:
+            return 0.0, 100.0
+        minimum = min(values)
+        maximum = max(values)
+        if minimum == maximum:
+            return minimum - 1.0, maximum + 1.0
+        return minimum, maximum
 
     async def async_set_native_value(self, value: float) -> None:
         """Validate and update this setting through the coordinator."""

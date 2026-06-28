@@ -5,6 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import CentralHeatingConfigEntry
+from .coordinator import ControllerCoordinator
 from .entity import ControllerEntity
 
 HEAT_BLAST_DESCRIPTION = ButtonEntityDescription(
@@ -25,7 +26,7 @@ async def async_setup_entry(
 class ControllerHeatBlastButton(ControllerEntity, ButtonEntity):
     """Start or restart a fixed-duration heat blast."""
 
-    def __init__(self, coordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the Heat Blast button."""
         super().__init__(coordinator, entry_id, HEAT_BLAST_DESCRIPTION)
 

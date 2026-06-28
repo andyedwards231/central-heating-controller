@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -14,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import CentralHeatingConfigEntry
+from .coordinator import ControllerCoordinator
 from .entity import ControllerEntity
 from .models import ControllerStatus
 
@@ -62,7 +64,7 @@ async def async_setup_entry(
 class ControllerStatusSensor(ControllerEntity, SensorEntity):
     """Publish the controller's current policy status."""
 
-    def __init__(self, coordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the status sensor."""
         super().__init__(coordinator, entry_id, STATUS_DESCRIPTION)
 
@@ -79,7 +81,7 @@ class ControllerStatusSensor(ControllerEntity, SensorEntity):
             "reason": data.result.reason,
             "current_temperature": data.current_temperature,
             "effective_target_temperature": data.result.target_temperature,
-            "learned_heating_rate": data.learned_rate,
+            "learned_heating_rate": data.learned_rate if data.learned_trusted else None,
             "manual_override": (True if data.status is ControllerStatus.MANUAL_OVERRIDE else None),
             "arrival_time": data.arrival_time,
             "preheat_start_time": data.preheat_start_time,
@@ -90,7 +92,7 @@ class ControllerStatusSensor(ControllerEntity, SensorEntity):
 class ControllerEffectiveTargetSensor(ControllerEntity, SensorEntity):
     """Publish the target selected by the current policy."""
 
-    def __init__(self, coordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the effective target sensor."""
         super().__init__(coordinator, entry_id, EFFECTIVE_TARGET_DESCRIPTION)
 
@@ -113,7 +115,7 @@ class ControllerEffectiveTargetSensor(ControllerEntity, SensorEntity):
 class ControllerLearnedRateSensor(ControllerEntity, SensorEntity):
     """Publish a trusted learned temperature increase per hour."""
 
-    def __init__(self, coordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the learned rate sensor."""
         super().__init__(coordinator, entry_id, LEARNED_RATE_DESCRIPTION)
 
@@ -140,7 +142,7 @@ class ControllerLearnedRateSensor(ControllerEntity, SensorEntity):
 class ControllerPreheatStartSensor(ControllerEntity, SensorEntity):
     """Publish the calculated start of a valid timed home journey."""
 
-    def __init__(self, coordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the pre-heat start sensor."""
         super().__init__(coordinator, entry_id, PREHEAT_START_DESCRIPTION)
 
@@ -155,6 +157,6 @@ class ControllerPreheatStartSensor(ControllerEntity, SensorEntity):
         )
 
     @property
-    def native_value(self):
+    def native_value(self) -> datetime | None:
         """Return the calculated pre-heat start."""
         return self.coordinator.data.preheat_start_time

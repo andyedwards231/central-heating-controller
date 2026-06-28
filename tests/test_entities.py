@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -16,6 +17,7 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import (
     ATTR_DEVICE_CLASS,
     ATTR_TEMPERATURE,
@@ -83,23 +85,32 @@ def _entry() -> MockConfigEntry:
     )
 
 
-def _set_states(hass) -> None:
+def _set_states(
+    hass,
+    *,
+    climate_overrides: dict | None = None,
+    omitted_climate_attributes: set[str] | None = None,
+    include_climate: bool = True,
+) -> None:
     """Set a stable occupied-low controller snapshot."""
-    hass.states.async_set(
-        "climate.hallway",
-        "heat",
-        {
-            "current_temperature": 16.0,
-            ATTR_TEMPERATURE: 17.0,
-            "hvac_action": "idle",
-            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-            "hvac_modes": ["off", "heat"],
-            "min_temp": 7.0,
-            "max_temp": 35.0,
-            "target_temp_step": 0.5,
-            ATTR_UNIT_OF_MEASUREMENT: UnitOfTemperature.CELSIUS,
-        },
-    )
+    climate_attributes = {
+        "current_temperature": 16.0,
+        ATTR_TEMPERATURE: 17.0,
+        "hvac_action": "idle",
+        "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        "hvac_modes": ["off", "heat"],
+        "min_temp": 7.0,
+        "max_temp": 35.0,
+        "target_temp_step": 0.5,
+        ATTR_UNIT_OF_MEASUREMENT: UnitOfTemperature.CELSIUS,
+    }
+    climate_attributes.update(climate_overrides or {})
+    for attribute in omitted_climate_attributes or set():
+        climate_attributes.pop(attribute, None)
+    if include_climate:
+        hass.states.async_set("climate.hallway", "heat", climate_attributes)
+    else:
+        hass.states.async_remove("climate.hallway")
     hass.states.async_set(
         "zone.home",
         "1",
@@ -117,11 +128,8 @@ def _set_states(hass) -> None:
 
 
 @pytest.fixture
-async def controller(hass):
-    """Set up the complete integration and return its entry and coordinator."""
-    _set_states(hass)
-    entry = _entry()
-    entry.add_to_hass(hass)
+async def controller_factory(hass):
+    """Return a factory for fully set up controller entries."""
 
     async def set_hvac_mode(call) -> None:
         state = hass.states.get("climate.hallway")
@@ -146,6 +154,7 @@ async def controller(hass):
     hass.services.async_register("climate", "set_hvac_mode", set_hvac_mode)
     hass.services.async_register("climate", "set_temperature", set_temperature)
 
+    entries = []
     with (
         patch(
             "custom_components.central_heating_controller.storage.ControllerStore.async_load",
@@ -156,10 +165,37 @@ async def controller(hass):
             AsyncMock(),
         ),
     ):
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-        yield entry, entry.runtime_data.coordinator
-        await hass.config_entries.async_unload(entry.entry_id)
+
+        async def setup(
+            *,
+            climate_overrides: dict | None = None,
+            omitted_climate_attributes: set[str] | None = None,
+            include_climate: bool = True,
+        ):
+            _set_states(
+                hass,
+                climate_overrides=climate_overrides,
+                omitted_climate_attributes=omitted_climate_attributes,
+                include_climate=include_climate,
+            )
+            entry = _entry()
+            entry.add_to_hass(hass)
+            assert await hass.config_entries.async_setup(entry.entry_id)
+            await hass.async_block_till_done()
+            entries.append(entry)
+            return entry, entry.runtime_data.coordinator
+
+        yield setup
+
+        for entry in entries:
+            if entry.state is ConfigEntryState.LOADED:
+                await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.fixture
+async def controller(controller_factory):
+    """Set up the ordinary controller fixture."""
+    return await controller_factory()
 
 
 def _entity_id(hass, entry, platform: str, key: str) -> str:
@@ -261,6 +297,60 @@ async def test_entity_states_availability_classes_units_and_attributes(hass, con
     )
 
 
+async def test_temperature_numbers_allow_thermostat_to_omit_target_step(
+    hass, controller_factory
+) -> None:
+    """A valid thermostat without a target step uses Home Assistant's safe default."""
+    entry, _coordinator = await controller_factory(omitted_climate_attributes={"target_temp_step"})
+
+    for key in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
+        state = hass.states.get(_entity_id(hass, entry, "number", key))
+        assert state is not None
+        assert state.state != "unavailable"
+        assert state.attributes[ATTR_STEP] == 1.0
+
+
+async def test_temperature_numbers_render_safely_when_climate_is_missing(
+    hass, controller_factory
+) -> None:
+    """Missing thermostat state leaves safe unavailable setting entities."""
+    entry, _coordinator = await controller_factory(include_climate=False)
+
+    for key in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
+        state = hass.states.get(_entity_id(hass, entry, "number", key))
+        assert state is not None
+        assert state.state == "unavailable"
+        assert math.isfinite(state.attributes[ATTR_MIN])
+        assert math.isfinite(state.attributes[ATTR_MAX])
+        assert state.attributes[ATTR_MIN] <= 14.0
+        assert state.attributes[ATTR_MAX] >= 20.0
+
+
+@pytest.mark.parametrize(
+    "climate_overrides",
+    (
+        {"min_temp": "cold"},
+        {"max_temp": float("inf")},
+        {"target_temp_step": "small"},
+    ),
+    ids=("malformed-minimum", "malformed-maximum", "malformed-step"),
+)
+async def test_temperature_numbers_render_safely_with_malformed_capabilities(
+    hass, controller_factory, climate_overrides
+) -> None:
+    """Malformed thermostat capabilities never break number state publication."""
+    entry, _coordinator = await controller_factory(climate_overrides=climate_overrides)
+
+    for key in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
+        state = hass.states.get(_entity_id(hass, entry, "number", key))
+        assert state is not None
+        assert state.state == "unavailable"
+        assert math.isfinite(state.attributes[ATTR_MIN])
+        assert math.isfinite(state.attributes[ATTR_MAX])
+        assert state.attributes[ATTR_MIN] <= 14.0
+        assert state.attributes[ATTR_MAX] >= 20.0
+
+
 async def test_auto_and_heat_blast_services(hass, controller) -> None:
     """Auto immediately re-evaluates and Heat Blast remains safely pressable."""
     entry, coordinator = controller
@@ -325,6 +415,26 @@ async def test_all_number_services_delegate_to_shared_setting_update(hass, contr
         CONF_DESTINATION_HOME_VALUE: None,
     }
     assert [call.args for call in coordinator.async_update_setting.await_args_list] == list(changes)
+
+
+async def test_number_service_reloads_entry_and_replaces_entities(hass, controller) -> None:
+    """A real option update unloads the old coordinator and publishes replacement state."""
+    entry, old_coordinator = controller
+    low_entity = _entity_id(hass, entry, "number", CONF_LOW_TEMP)
+
+    await hass.services.async_call(
+        "number",
+        "set_value",
+        {"entity_id": low_entity, "value": 18.0},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.coordinator is not old_coordinator
+    assert entry.options[CONF_LOW_TEMP] == 18.0
+    assert _entity_id(hass, entry, "number", CONF_LOW_TEMP) == low_entity
+    assert hass.states.get(low_entity).state == "18.0"
 
 
 @pytest.mark.parametrize(
@@ -421,6 +531,7 @@ async def test_dynamic_sensor_availability_and_status_details(hass, controller) 
     assert hass.states.get(target_id).state == "unavailable"
     assert hass.states.get(rate_id).state == "unavailable"
     assert hass.states.get(preheat_id).state == "unavailable"
+    assert "learned_heating_rate" not in hass.states.get(status_id).attributes
 
 
 def test_entity_translations_are_complete_and_aligned() -> None:
