@@ -89,6 +89,7 @@ _SETTING_KEYS = {
 _COMMAND_RECORD_LIMIT = 16
 _COMMAND_RECORD_TTL_SECONDS = 300
 _COMMAND_ACK_WINDOW_SECONDS = 10
+_EVENT_CLASSIFICATION_RETRY_LIMIT = 2
 
 
 class _CommandMatchStrength(StrEnum):
@@ -325,7 +326,25 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         while True:
             while self._event_queue:
                 event = self._event_queue[0]
-                await self._async_classify_event(event)
+                for attempt in range(1, _EVENT_CLASSIFICATION_RETRY_LIMIT + 2):
+                    try:
+                        await self._async_classify_event(event)
+                    except Exception:
+                        if attempt <= _EVENT_CLASSIFICATION_RETRY_LIMIT:
+                            _LOGGER.warning(
+                                "State-event classification failed; retrying accepted event "
+                                "(attempt %d of %d)",
+                                attempt,
+                                _EVENT_CLASSIFICATION_RETRY_LIMIT + 1,
+                                exc_info=True,
+                            )
+                            continue
+                        _LOGGER.error(
+                            "Dropping accepted state event after %d classification attempts",
+                            attempt,
+                            exc_info=True,
+                        )
+                    break
                 self._event_queue.popleft()
             await self.async_refresh()
             if not self._event_queue:

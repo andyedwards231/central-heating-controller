@@ -1714,6 +1714,36 @@ async def test_transient_classification_failure_retries_accepted_event(hass) -> 
     assert coordinator.data.status is ControllerStatus.HIGH
 
 
+async def test_permanent_classification_failure_is_bounded_during_shutdown(
+    hass, caplog
+) -> None:
+    """A poison event is dropped after bounded retries so shutdown completes."""
+    coordinator = await _create_override(hass)
+    original_classify = coordinator._async_classify_event
+    attempts = 0
+
+    async def always_fail(_event):
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0.01)
+        raise RuntimeError("permanent classification failure")
+
+    coordinator._async_classify_event = always_fail
+    hass.states.async_set("schedule.heating", "on")
+    shutdown = asyncio.create_task(coordinator.async_shutdown())
+    try:
+        await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.15)
+    finally:
+        coordinator._async_classify_event = original_classify
+        if not shutdown.done():
+            await asyncio.wait_for(shutdown, timeout=1)
+
+    assert attempts == 3
+    assert not coordinator._event_queue
+    assert not coordinator._event_tasks
+    assert "Dropping accepted state event after 3 classification attempts" in caplog.text
+
+
 async def test_shutdown_restarts_failed_worker_to_drain_accepted_event(hass) -> None:
     """A worker failure cannot strand an already-admitted target during shutdown."""
     _set_baseline_states(hass)
