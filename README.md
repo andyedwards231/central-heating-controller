@@ -158,6 +158,13 @@ The effective target and pre-heat start sensors are unavailable when there is no
 meaningful value. The learned heating rate sensor is unavailable until the learning
 model is trusted.
 
+## Lovelace Card
+
+This repository also includes a drop-in custom Lovelace card at
+`www/central-heating-controller-card.js`. It supports daily control, visual status,
+and settings modes from the same status sensor configuration. See
+`docs/lovelace-card.md` for installation and YAML examples.
+
 ## Troubleshooting
 
 For unavailable fallbacks, check the selected thermostat first. If the thermostat is
