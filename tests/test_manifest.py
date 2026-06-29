@@ -75,7 +75,7 @@ def test_readme_documents_copy_ready_operation_and_safety() -> None:
         "sensor.central_heating_controller_learned_heating_rate",
         "sensor.central_heating_controller_preheat_start_time",
         "destination matching",
-        "configured-removed ETA disables preheat",
+        "configured ETA entity that is missing disables preheat",
         "unconfigured or existing invalid ETA starts preheat immediately",
         "three-sample learning period",
         "reset learning",

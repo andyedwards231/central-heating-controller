@@ -77,7 +77,8 @@ The `status` sensor publishes these stable states:
 - `heat_blast`: a fixed high-temperature heat blast is active.
 - `manual_override`: the thermostat target was changed externally and the
   controller is preserving it.
-- `unavailable`: the thermostat is unavailable or cannot be safely commanded.
+- `unavailable`: the thermostat is missing or unavailable, so the controller does
+  not command it.
 
 The status sensor also exposes useful attributes such as the policy reason,
 current temperature, effective target temperature, trusted learned heating rate,
@@ -120,10 +121,10 @@ When nobody is home and the destination means home, the controller can pre-heat:
   home journey.
 - If `arrival_time_entity` is configured and the entity exists but has an invalid,
   unavailable, unknown, blank, or past ETA, pre-heating starts immediately.
-- If the configured ETA entity was removed or does not exist,
-  configured-removed ETA disables preheat.
+- If the configured ETA entity was removed or does not exist, a configured ETA
+  entity that is missing disables preheat.
 - In short: unconfigured or existing invalid ETA starts preheat immediately,
-  while a configured-removed ETA disables preheat.
+  while a configured ETA entity that is missing disables preheat.
 - If the ETA is valid and in the future, the controller calculates a pre-heat start
   time from the selected warm-up duration.
 - If the destination changes away from home, the pre-heat journey is cancelled.
@@ -160,9 +161,10 @@ model is trusted.
 ## Troubleshooting
 
 For unavailable fallbacks, check the selected thermostat first. If the thermostat is
-missing, unavailable, has unusable temperature metadata, or cannot accept a target
-temperature, the controller keeps affected entities unavailable rather than issuing
-unsafe commands. If the schedule helper is unavailable while someone is home, the
+missing or unavailable, the controller reports `unavailable` and does not command
+the thermostat. If the thermostat has unusable temperature capability metadata,
+the high, low, and eco setting controls become unavailable until the metadata is
+valid again. If the schedule helper is unavailable while someone is home, the
 controller falls back to the low target.
 
 Useful troubleshooting places:
@@ -188,6 +190,6 @@ For safe removal:
 5. Delete `<config>/custom_components/central_heating_controller` only after the
    integration entry is removed.
 
-Removal clears the integration's stored auto mode, heat blast, manual override, and
-learning state for that entry. It does not delete your thermostat, people, zone,
-schedule helper, destination sensor, or ETA sensor.
+Removal unloads the controller and clears repair issues for that entry. It does
+not delete your thermostat, people, zone, schedule helper, destination sensor, ETA
+sensor, or other Home Assistant entities.
