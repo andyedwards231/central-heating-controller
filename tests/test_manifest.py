@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 INTEGRATION_DIR = Path("custom_components/central_heating_controller")
+BRAND_DIR = INTEGRATION_DIR / "brand"
 
 
 def test_manifest_declares_copy_ready_config_flow() -> None:
@@ -17,7 +18,7 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
         "https://github.com/andyedwards231/central-heating-controller/issues"
     )
     assert manifest["codeowners"] == ["@andyedwards231"]
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.1.1"
     assert manifest["iot_class"] == "local_push"
     assert manifest["integration_type"] == "service"
     assert manifest["requirements"] == []
@@ -26,6 +27,28 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
 def test_hacs_manifest_declares_display_name() -> None:
     hacs_manifest = json.loads(Path("hacs.json").read_text())
     assert hacs_manifest["name"] == "Central Heating Controller"
+
+
+def test_brand_assets_are_valid_pngs_with_expected_dimensions() -> None:
+    expected = {
+        "icon.png": (256, 256),
+        "icon@2x.png": (512, 512),
+        "logo.png": (768, 256),
+        "logo@2x.png": (1536, 512),
+    }
+
+    for filename, dimensions in expected.items():
+        data = (BRAND_DIR / filename).read_bytes()
+        assert data.startswith(b"\x89PNG\r\n\x1a\n")
+        assert _png_size_and_color_type(data) == (*dimensions, 6)
+
+
+def _png_size_and_color_type(data: bytes) -> tuple[int, int, int]:
+    assert data[12:16] == b"IHDR"
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    color_type = data[25]
+    return width, height, color_type
 
 
 def test_localization_files_are_complete_and_equal() -> None:
