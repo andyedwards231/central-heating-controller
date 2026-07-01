@@ -10,10 +10,22 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
     assert manifest["domain"] == "central_heating_controller"
     assert manifest["name"] == "Central Heating Controller"
     assert manifest["config_flow"] is True
+    assert manifest["documentation"] == (
+        "https://github.com/andyedwards231/central-heating-controller"
+    )
+    assert manifest["issue_tracker"] == (
+        "https://github.com/andyedwards231/central-heating-controller/issues"
+    )
+    assert manifest["codeowners"] == ["@andyedwards231"]
     assert manifest["version"] == "0.1.0"
     assert manifest["iot_class"] == "local_push"
     assert manifest["integration_type"] == "service"
     assert manifest["requirements"] == []
+
+
+def test_hacs_manifest_declares_display_name() -> None:
+    hacs_manifest = json.loads(Path("hacs.json").read_text())
+    assert hacs_manifest["name"] == "Central Heating Controller"
 
 
 def test_localization_files_are_complete_and_equal() -> None:
