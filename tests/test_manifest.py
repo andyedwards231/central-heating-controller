@@ -18,7 +18,7 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
         "https://github.com/andyedwards231/central-heating-controller/issues"
     )
     assert manifest["codeowners"] == ["@andyedwards231"]
-    assert manifest["version"] == "0.1.1"
+    assert manifest["version"] == "1.0.1"
     assert manifest["iot_class"] == "local_push"
     assert manifest["integration_type"] == "service"
     assert manifest["requirements"] == []

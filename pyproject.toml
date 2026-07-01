@@ -1,6 +1,6 @@
 [project]
 name = "central-heating-controller"
-version = "0.1.1"
+version = "1.0.1"
 description = "Home Assistant central heating controller integration"
 requires-python = ">=3.14.2"
 dependencies = []
