@@ -1,12 +1,14 @@
 {
   "domain": "central_heating_controller",
   "name": "Central Heating Controller",
-  "codeowners": ["@andyedwards231"],
+  "codeowners": [
+    "@andyedwards231"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/andyedwards231/central-heating-controller",
-  "issue_tracker": "https://github.com/andyedwards231/central-heating-controller/issues",
   "integration_type": "service",
   "iot_class": "local_push",
+  "issue_tracker": "https://github.com/andyedwards231/central-heating-controller/issues",
   "requirements": [],
   "version": "1.1.0"
 }
