@@ -39,3 +39,7 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # Custom-repository updates do not require a catalogue licence.
+          # Keep the owner's current licensing terms until explicitly changed.
+          ignore: license
+          comment: false
