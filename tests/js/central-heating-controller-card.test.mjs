@@ -193,3 +193,37 @@ test("settings mode disables unavailable number controls without throwing", () =
   assert.match(card.shadowRoot.innerHTML, /is-disabled/);
   assert.match(card.shadowRoot.innerHTML, /disabled/);
 });
+
+test("finds legacy warm-up and preheat entities retained after an upgrade", () => {
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "settings" });
+  const hass = createHass();
+  for (const [current, legacy] of [
+    ["number.central_heating_controller_fallback_warmup_minutes", "number.central_heating_controller_fallback_warm_up_duration"],
+    ["number.central_heating_controller_maximum_warmup_minutes", "number.central_heating_controller_maximum_warm_up_duration"],
+    ["sensor.central_heating_controller_preheat_start_time", "sensor.central_heating_controller_pre_heat_start_time"],
+  ]) {
+    hass.states[legacy] = { ...hass.states[current], entity_id: legacy };
+    delete hass.states[current];
+  }
+  card.hass = hass;
+
+  assert.equal(card._entities.fallbackWarmup, "number.central_heating_controller_fallback_warm_up_duration");
+  assert.equal(card._entities.maximumWarmup, "number.central_heating_controller_maximum_warm_up_duration");
+  assert.equal(card._entities.preheatStart, "sensor.central_heating_controller_pre_heat_start_time");
+  assert.match(card.shadowRoot.innerHTML, /60 min/);
+  assert.match(card.shadowRoot.innerHTML, /180 min/);
+});
+
+test("explicit entity overrides take priority over legacy detection", () => {
+  const card = new Card();
+  card.setConfig({
+    entity: "sensor.central_heating_controller_status",
+    entities: { fallback_warmup_minutes: "number.custom_fallback" },
+  });
+  card.hass = createHass({ states: {
+    "number.central_heating_controller_fallback_warmup_minutes": undefined,
+    "number.central_heating_controller_fallback_warm_up_duration": { state: "60", attributes: {} },
+  } });
+  assert.equal(card._entities.fallbackWarmup, "number.custom_fallback");
+});

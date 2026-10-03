@@ -13,6 +13,13 @@ const ENTITY_SUFFIXES = {
   preheatStart: ["sensor", "preheat_start_time", "preheat_start_time"],
 };
 
+// Existing entity registries retain names created by releases before 1.1.0.
+const LEGACY_SUFFIXES = {
+  fallbackWarmup: "fallback_warm_up_duration",
+  maximumWarmup: "maximum_warm_up_duration",
+  preheatStart: "pre_heat_start_time",
+};
+
 const STATUS_LABELS = {
   high: "High",
   low: "Low",
@@ -49,6 +56,9 @@ class CentralHeatingControllerCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    if (this._config) {
+      this._entities = this._deriveEntities(this._config.entity, this._config.entities || {});
+    }
     this._render();
   }
 
@@ -68,7 +78,11 @@ class CentralHeatingControllerCard extends HTMLElement {
     const entities = { status: statusEntity };
 
     for (const [property, [entityDomain, suffix, overrideKey]] of Object.entries(ENTITY_SUFFIXES)) {
-      entities[property] = overrides[overrideKey] || `${entityDomain}.${base}_${suffix}`;
+      const standardId = `${entityDomain}.${base}_${suffix}`;
+      const legacyId = LEGACY_SUFFIXES[property]
+        ? `${entityDomain}.${base}_${LEGACY_SUFFIXES[property]}` : null;
+      entities[property] = overrides[overrideKey]
+        || (!this._state(standardId) && legacyId && this._state(legacyId) ? legacyId : standardId);
     }
 
     return entities;

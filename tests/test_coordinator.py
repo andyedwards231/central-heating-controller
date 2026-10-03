@@ -266,7 +266,7 @@ async def test_occupied_schedule_high_commands_mode_then_temperature(hass) -> No
         ("not_home", "on", "work", "unknown", ControllerStatus.AWAY),
         ("not_home", "on", "home", "2026-06-28T19:00:00+00:00", ControllerStatus.AWAY),
         ("not_home", "on", "home", "2026-06-28T17:30:00+00:00", ControllerStatus.PREHEATING),
-        ("not_home", "on", "home", "malformed", ControllerStatus.PREHEATING),
+        ("not_home", "on", "home", "malformed", ControllerStatus.AWAY),
         ("not_home", "on", "work", "malformed", ControllerStatus.AWAY),
         ("home", STATE_UNAVAILABLE, "work", "unknown", ControllerStatus.LOW),
     ],
@@ -447,11 +447,15 @@ async def test_configured_missing_arrival_disables_preheat_and_creates_issue(has
     )
 
 
-@pytest.mark.parametrize("eta_state", [STATE_UNKNOWN, STATE_UNAVAILABLE, "malformed"])
-async def test_configured_existing_invalid_arrival_preheats_immediately(
+@pytest.mark.parametrize(
+    "eta_state",
+    [STATE_UNKNOWN, STATE_UNAVAILABLE, "malformed", "", NOW.isoformat(),
+     (NOW - timedelta(minutes=1)).isoformat()],
+)
+async def test_configured_existing_invalid_arrival_blocks_preheat(
     hass, eta_state
 ) -> None:
-    """An existing ETA entity with no usable time keeps approved immediate preheat."""
+    """An existing ETA entity needs a valid future arrival to permit preheating."""
     _set_baseline_states(hass)
     hass.states.async_set("person.andy", "work")
     hass.states.async_set("person.alex", STATE_UNKNOWN)
@@ -460,7 +464,7 @@ async def test_configured_existing_invalid_arrival_preheats_immediately(
 
     coordinator, entry = await _setup_coordinator(hass)
 
-    assert coordinator.data.status is ControllerStatus.PREHEATING
+    assert coordinator.data.status is ControllerStatus.AWAY
     assert (
         ir.async_get(hass).async_get_issue(
             DOMAIN, f"{entry.entry_id}_{CONF_ARRIVAL_TIME}"
@@ -581,10 +585,12 @@ async def test_redundant_commands_are_suppressed_independently(hass) -> None:
     )
 
 
-async def test_service_failure_clears_pending_and_retries(hass) -> None:
+async def test_service_failure_clears_pending_and_retries(hass, freezer) -> None:
     """A failed service is contained and is attempted again on the next refresh."""
+    freezer.move_to(NOW)
     _set_baseline_states(hass)
     coordinator, _ = await _setup_coordinator(hass)
+    freezer.tick(11)
     hass.services.async_call.reset_mock()
     hass.services.async_call.side_effect = HomeAssistantError("offline")
 
@@ -634,8 +640,9 @@ async def test_blast_auto_and_expiry_actions(hass) -> None:
     assert await coordinator.async_start_blast() is False
 
 
-async def test_learning_accepts_sample_and_persists(hass) -> None:
+async def test_learning_accepts_sample_and_persists(hass, freezer) -> None:
     """Active-heating observations update and persist the learned model."""
+    freezer.move_to(NOW)
     _set_baseline_states(hass)
     hass.states.async_set(
         "climate.hallway",
@@ -644,6 +651,7 @@ async def test_learning_accepts_sample_and_persists(hass) -> None:
     )
     coordinator, _ = await _setup_coordinator(hass)
     coordinator.store.async_save.reset_mock()
+    freezer.move_to(NOW + timedelta(minutes=30))
     hass.states.async_set(
         "climate.hallway",
         "heat",
@@ -901,7 +909,6 @@ async def test_changed_state_notifies_once_before_service_call(hass) -> None:
     assert events == [
         ("listener", ControllerStatus.HIGH),
         ("service", ControllerStatus.HIGH),
-        ("service", ControllerStatus.HIGH),
     ]
 
 
@@ -945,11 +952,13 @@ async def test_unexpected_service_failure_notifies_failure_and_recovery(hass) ->
     assert observations[-1] == (ControllerStatus.HIGH, True)
 
 
-async def test_shutdown_waits_for_evaluation_and_stops_followup_target(hass) -> None:
+async def test_shutdown_waits_for_evaluation_and_stops_followup_target(hass, freezer) -> None:
     """Unload waits for active mode I/O and prevents the old target write."""
+    freezer.move_to(NOW)
     _set_baseline_states(hass)
     coordinator, entry = await _setup_coordinator(hass)
     entry.runtime_data = ControllerRuntimeData(coordinator)
+    freezer.tick(11)
     hass.services.async_call.reset_mock()
     mode_started = asyncio.Event()
     release_mode = asyncio.Event()
@@ -1769,16 +1778,17 @@ async def test_command_ledgers_are_bounded_and_expire(hass) -> None:
     with patch(
         "custom_components.central_heating_controller.coordinator.time.monotonic",
         return_value=1000.0,
-    ):
+    ) as monotonic:
         coordinator, _ = await _setup_coordinator(hass)
-        for _ in range(20):
+        for index in range(20):
+            monotonic.return_value = 1000.0 + (index + 1) * 11
             await coordinator.async_refresh()
 
     assert len(coordinator._target_command_records) == 16
     assert len(coordinator._hvac_command_records) == 16
     with patch(
         "custom_components.central_heating_controller.coordinator.time.monotonic",
-        return_value=1400.0,
+        return_value=1600.0,
     ):
         coordinator._prune_command_records(coordinator._target_command_records)
         coordinator._prune_command_records(coordinator._hvac_command_records)
@@ -2088,7 +2098,7 @@ async def test_minute_evaluation_expires_both_command_ledgers(hass) -> None:
 
     with patch(
         "custom_components.central_heating_controller.coordinator.time.monotonic",
-        return_value=1400.0,
+        return_value=1600.0,
     ):
         await coordinator.async_refresh()
 
@@ -2096,3 +2106,136 @@ async def test_minute_evaluation_expires_both_command_ledgers(hass) -> None:
     assert coordinator.pending_hvac_mode is None
     assert not coordinator._target_command_records
     assert not coordinator._hvac_command_records
+
+
+async def test_thermostat_outage_breaks_learning_window(hass, freezer) -> None:
+    """An unobserved outage must not contribute to the learned heating rate."""
+    freezer.move_to(NOW)
+    _set_baseline_states(hass)
+    hass.states.async_set(
+        "climate.hallway", "heat",
+        {"current_temperature": 16.0, "temperature": 20.0, "hvac_action": "heating"},
+    )
+    coordinator, _ = await _setup_coordinator(hass)
+    freezer.move_to(NOW + timedelta(minutes=10))
+    hass.states.async_set("climate.hallway", STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    freezer.move_to(NOW + timedelta(minutes=30))
+    hass.states.async_set(
+        "climate.hallway", "heat",
+        {"current_temperature": 17.0, "temperature": 20.0, "hvac_action": "heating"},
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.learner.sample_count == 0
+    assert coordinator.learner.rate is None
+
+
+@pytest.mark.parametrize("initial_target", [15.0, 17.0])
+async def test_own_mode_change_restoring_target_does_not_create_override(
+    hass, initial_target
+) -> None:
+    """Thermostats can restore a saved target when switched from off to heat."""
+    _set_baseline_states(hass)
+    hass.states.async_set(
+        "climate.hallway", "off",
+        {"current_temperature": 16.0, "temperature": initial_target},
+    )
+
+    async def echo_service(_domain, service, data, *, blocking, context):
+        state = hass.states.get("climate.hallway")
+        if service == "set_hvac_mode":
+            hass.states.async_set(
+                state.entity_id, data["hvac_mode"],
+                dict(state.attributes) | {"temperature": 22.0}, context=context,
+            )
+        else:
+            hass.states.async_set(
+                state.entity_id, state.state,
+                dict(state.attributes) | {"temperature": data["temperature"]}, context=context,
+            )
+
+    hass.services.async_call.side_effect = echo_service
+    coordinator, _ = await _setup_coordinator(hass)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("climate.hallway").attributes["temperature"] == 17.0
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.data.status is ControllerStatus.LOW
+
+
+async def test_pending_commands_are_not_resent_on_unrelated_events(hass, freezer) -> None:
+    """Allow a slow thermostat to acknowledge before issuing identical writes."""
+    freezer.move_to(NOW)
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    assert hass.services.async_call.await_count == 2
+    hass.services.async_call.reset_mock()
+    for _ in range(5):
+        await coordinator.async_refresh()
+    hass.services.async_call.assert_not_awaited()
+
+    freezer.tick(11)
+    await coordinator.async_refresh()
+    assert hass.services.async_call.await_count == 2
+
+
+@pytest.mark.parametrize("invalid_eta", ["unavailable", "unknown", "invalid", None])
+async def test_eta_becoming_invalid_stops_preheating_and_recovers(
+    hass, freezer, invalid_eta
+) -> None:
+    """Loss of a valid ETA cancels preheat; recovery must re-evaluate the window."""
+    freezer.move_to(NOW)
+    _set_baseline_states(hass)
+    hass.states.async_set("person.andy", "work")
+    hass.states.async_set("sensor.destination", "home")
+    hass.states.async_set("sensor.eta", (NOW + timedelta(minutes=30)).isoformat())
+    coordinator, _ = await _setup_coordinator(hass)
+    assert coordinator.data.status is ControllerStatus.PREHEATING
+
+    if invalid_eta is None:
+        hass.states.async_remove("sensor.eta")
+    else:
+        hass.states.async_set("sensor.eta", invalid_eta)
+    await hass.async_block_till_done()
+    assert coordinator.data.status is ControllerStatus.AWAY
+    assert coordinator.data.arrival_time is None
+    assert coordinator.data.preheat_start_time is None
+
+    hass.states.async_set("sensor.eta", (NOW + timedelta(minutes=30)).isoformat())
+    await hass.async_block_till_done()
+    assert coordinator.data.status is ControllerStatus.PREHEATING
+
+    freezer.move_to(NOW + timedelta(minutes=30))
+    await coordinator.async_refresh()
+    assert coordinator.data.status is ControllerStatus.AWAY
+    assert coordinator.data.result.target_temperature == 14.0
+
+
+async def test_intermediate_matter_report_does_not_consume_target_acknowledgement(
+    hass, freezer
+) -> None:
+    """Matter may publish unchanged state after a write, before the actual target report."""
+    freezer.move_to(NOW)
+    _set_baseline_states(hass)
+    _set_synchronised_climate(hass, 15.0)
+    coordinator, _ = await _setup_coordinator(hass)
+    call = next(
+        call for call in hass.services.async_call.await_args_list
+        if call.args[1] == "set_temperature"
+    )
+    climate = hass.states.get("climate.hallway")
+    hass.states.async_set(
+        climate.entity_id, climate.state,
+        dict(climate.attributes) | {"current_temperature": 16.1},
+        context=call.kwargs["context"],
+    )
+    await hass.async_block_till_done()
+    assert coordinator.pending_target == 17.0
+    assert hass.services.async_call.await_count == 1
+
+    _set_synchronised_climate(hass, 17.0)
+    await hass.async_block_till_done()
+    assert coordinator.pending_target is None
+    assert coordinator.persistent_state.manual_override_target is None
+    assert coordinator.data.status is ControllerStatus.LOW

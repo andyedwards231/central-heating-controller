@@ -1,4 +1,5 @@
 import json
+import tomllib
 from pathlib import Path
 
 
@@ -18,7 +19,7 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
         "https://github.com/andyedwards231/central-heating-controller/issues"
     )
     assert manifest["codeowners"] == ["@andyedwards231"]
-    assert manifest["version"] == "1.0.1"
+    assert manifest["version"] == tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
     assert manifest["iot_class"] == "local_push"
     assert manifest["integration_type"] == "service"
     assert manifest["requirements"] == []
@@ -27,6 +28,7 @@ def test_manifest_declares_copy_ready_config_flow() -> None:
 def test_hacs_manifest_declares_display_name() -> None:
     hacs_manifest = json.loads(Path("hacs.json").read_text())
     assert hacs_manifest["name"] == "Central Heating Controller"
+    assert hacs_manifest["homeassistant"] == "2026.9.3"
 
 
 def test_brand_assets_are_valid_pngs_with_expected_dimensions() -> None:
@@ -60,7 +62,7 @@ def test_localization_files_are_complete_and_equal() -> None:
 
 def test_readme_documents_copy_ready_operation_and_safety() -> None:
     readme = Path("README.md").read_text()
-    normalized = readme.casefold()
+    normalized = " ".join(readme.casefold().split())
 
     for heading in (
         "Installation",
@@ -111,7 +113,7 @@ def test_readme_documents_copy_ready_operation_and_safety() -> None:
         "sensor.central_heating_controller_preheat_start_time",
         "destination matching",
         "configured ETA entity that is missing disables preheat",
-        "unconfigured or existing invalid ETA starts preheat immediately",
+        "past, or missing ETA blocks pre-heating",
         "three-sample learning period",
         "reset learning",
         "destination changes",

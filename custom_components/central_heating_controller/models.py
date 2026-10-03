@@ -110,6 +110,7 @@ class ControllerState:
     preheat_start_time: datetime | None
     warmup_minutes: float | int
     temperature_capabilities: TemperatureCapabilities | None = None
+    auto_mode: bool = True
 
     @property
     def status(self) -> ControllerStatus:

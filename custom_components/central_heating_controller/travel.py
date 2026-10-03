@@ -76,9 +76,15 @@ def parse_arrival_time(raw: object, local_tz: tzinfo | None) -> datetime | None:
         value = raw.strip()
         if not value or value.casefold() in {"unknown", "unavailable"}:
             return None
-        if value.isdigit():
+        try:
+            timestamp = float(value)
+        except ValueError:
+            timestamp = None
+        if timestamp is not None:
+            if not math.isfinite(timestamp):
+                return None
             try:
-                parsed = dt_util.utc_from_timestamp(int(value))
+                parsed = dt_util.utc_from_timestamp(timestamp)
             except OverflowError, OSError, ValueError:
                 return None
         else:
@@ -138,7 +144,7 @@ def preheat_timing(
 
     arrival = parse_arrival_time(raw_arrival, local_tz)
     if arrival is None or arrival <= now_utc:
-        return PreheatTiming(True, None, None)
+        return PreheatTiming(False, None, None)
 
     start = arrival - timedelta(minutes=warmup_minutes)
     return PreheatTiming(now_utc >= start, arrival, start)

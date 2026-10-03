@@ -88,8 +88,9 @@ def test_aware_iso_arrival_converts_to_utc() -> None:
     )
 
 
-def test_finite_float_unix_timestamp_preserves_fractional_seconds() -> None:
-    assert parse_arrival_time(1767270600.5, timezone.utc) == datetime(
+@pytest.mark.parametrize("raw", [1767270600.5, "1767270600.5"])
+def test_finite_float_unix_timestamp_preserves_fractional_seconds(raw) -> None:
+    assert parse_arrival_time(raw, timezone.utc) == datetime(
         2026, 1, 1, 12, 30, 0, 500000, tzinfo=timezone.utc
     )
 
@@ -116,10 +117,10 @@ def test_zoneinfo_timezone_remains_supported() -> None:
     )
 
 
-def test_bad_or_past_arrival_means_immediate_preheat() -> None:
+def test_bad_arrival_blocks_preheat() -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
     timing = preheat_timing("unavailable", now, warmup_minutes=60, local_tz=timezone.utc)
-    assert timing.ready is True
+    assert timing.ready is False
     assert timing.arrival is None
     assert timing.start is None
 
@@ -128,9 +129,9 @@ def test_bad_or_past_arrival_means_immediate_preheat() -> None:
     "arrival",
     ["2026-01-01T11:59:59+00:00", "2026-01-01T12:00:00+00:00"],
 )
-def test_past_or_equal_arrival_means_immediate_preheat(arrival) -> None:
+def test_past_or_equal_arrival_blocks_preheat(arrival) -> None:
     now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    assert preheat_timing(arrival, now, 60, timezone.utc) == PreheatTiming(True, None, None)
+    assert preheat_timing(arrival, now, 60, timezone.utc) == PreheatTiming(False, None, None)
 
 
 def test_future_arrival_waits_until_calculated_start() -> None:

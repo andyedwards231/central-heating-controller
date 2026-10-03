@@ -33,6 +33,11 @@ class ControllerEntity(CoordinatorEntity[ControllerCoordinator]):
         )
 
     @property
+    def suggested_object_id(self) -> str:
+        """Use stable suffixes that match the bundled dashboard configuration."""
+        return self.entity_description.key
+
+    @property
     def thermostat_temperature_unit(self) -> str:
         """Return the selected thermostat's native temperature unit."""
         capabilities = self.coordinator.data.temperature_capabilities

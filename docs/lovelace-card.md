@@ -3,6 +3,9 @@
 The repository includes a dependency-free Lovelace custom card at
 `www/central-heating-controller-card.js`.
 
+HACS installs the integration directory only; this optional card must be copied
+separately, including after a card update.
+
 Copy it to your Home Assistant config:
 
 ```text
@@ -12,7 +15,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js
+url: /local/central-heating-controller-card.js?v=1.1.0
 type: module
 ```
 
@@ -43,8 +46,13 @@ mode: settings
 ## Renamed Entities
 
 The card derives related entities from the status sensor by replacing `_status`
-with the integration's standard suffixes. If Home Assistant added suffixes or you
-renamed entities, override them:
+with the integration's standard suffixes.
+
+The card also recognizes the old `fallback_warm_up_duration`,
+`maximum_warm_up_duration`, and `pre_heat_start_time` suffixes retained in existing
+installations after an upgrade. Existing entity IDs do not need to be renamed.
+
+If Home Assistant added suffixes or you renamed entities, override them:
 
 ```yaml
 type: custom:central-heating-controller-card

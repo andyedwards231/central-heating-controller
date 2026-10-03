@@ -399,7 +399,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         )
         if mode_match is not None:
             mode_record, _strength = mode_match
-            self._retire_command_record(self._hvac_command_records, mode_record)
+            if new_state.state == mode_record.value:
+                self._retire_command_record(self._hvac_command_records, mode_record)
 
         new_target = _finite_float(new_state.attributes.get(ATTR_TEMPERATURE))
         old_target = (
@@ -415,6 +416,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         )
         if target_match is not None:
             target_record, _strength = target_match
+            # Some devices first echo the service context with the old value.
+            # Keep provenance until the requested target actually arrives.
+            if not _targets_match(new_state, new_target, target_record.value):
+                return
             self._retire_command_record(self._target_command_records, target_record)
             manual_target = self.persistent_state.manual_override_target
             if (
@@ -422,6 +427,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 and not _targets_match(new_state, new_target, manual_target)
             ):
                 self._stale_own_target_echo = True
+            return
+
+        # Changing HVAC mode can restore the thermostat's saved setpoint.
+        # A target carried by our mode acknowledgement is not a manual change.
+        if mode_match is not None and mode_match[1] is _CommandMatchStrength.STRONG:
             return
 
         if (
@@ -511,6 +521,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         )
         self.pending_hvac_mode = (
             str(self._hvac_command_records[-1].value) if self._hvac_command_records else None
+        )
+
+    def _command_pending(self, records: deque[_CommandRecord], value: str | float) -> bool:
+        """Allow a short acknowledgement window before repeating the latest write."""
+        return bool(
+            records
+            and records[-1].value == value
+            and time.monotonic() - records[-1].issued_monotonic < _COMMAND_ACK_WINDOW_SECONDS
         )
 
     def _set_manual_override(
@@ -633,6 +651,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     def _preheat_ready(self, eta: State | None, now: datetime) -> bool:
         """Resolve ETA readiness for one event payload at admission time."""
         if not self._journey_home(self.hass.states.get(self.config[CONF_DESTINATION])):
+            return False
+        if not self.config.get(CONF_ARRIVAL_TIME):
+            return True
+        if not self._available(eta):
             return False
         climate = self._climate_state()
         current_temperature = (
@@ -767,14 +789,15 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             else None
         )
 
-        learned = None
-        if thermostat_available and climate is not None:
-            learned = self.learner.observe(
-                now,
-                current_temperature,
-                current_target,
-                climate.attributes.get(ATTR_HVAC_ACTION) == "heating",
-            )
+        # Observe unavailable periods too, so an outage breaks the sample window.
+        learned = self.learner.observe(
+            now,
+            current_temperature,
+            current_target,
+            thermostat_available
+            and climate is not None
+            and climate.attributes.get(ATTR_HVAC_ACTION) == "heating",
+        )
         if learned is not None:
             self._copy_learning_state()
             await self.store.async_save(self.persistent_state)
@@ -793,7 +816,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         arrival = None
         start = None
         preheat_ready = False
-        if journey_home and not arrival_entity_missing:
+        if journey_home and not arrival_entity:
+            preheat_ready = True
+        elif journey_home and not arrival_entity_missing:
             raw_eta = eta.state if self._available(eta) and eta is not None else None
             local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
             timing = preheat_timing(raw_eta, now, int(warmup_minutes), local_tz)
@@ -872,6 +897,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             preheat_start_time=start,
             warmup_minutes=warmup_minutes,
             temperature_capabilities=temperature_capabilities,
+            auto_mode=self.persistent_state.auto_mode,
         )
         if state != self.data:
             self.async_set_updated_data(state)
@@ -902,7 +928,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         ):
             return
         entity_id = self.config[CONF_CLIMATE]
-        if climate.state != desired_mode:
+        if climate.state != desired_mode and not self._command_pending(
+            self._hvac_command_records, desired_mode
+        ):
             self._prune_command_records(self._hvac_command_records)
             mode_record = self._new_command_record(desired_mode)
             self._hvac_command_records.append(mode_record)
@@ -929,7 +957,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             or desired_target is None
         ):
             return
-        await self._async_apply_target_command(climate, desired_target)
+        # The mode service may have changed the target or device availability.
+        live_climate = self._climate_state()
+        if self._available(live_climate) and live_climate is not None:
+            await self._async_apply_target_command(live_climate, desired_target)
 
     async def _async_apply_target_command(self, climate: State, desired_target: float) -> None:
         """Write one target with bounded provenance when it differs from live state."""
@@ -945,6 +976,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         entity_id = self.config[CONF_CLIMATE]
         self._prune_command_records(self._target_command_records)
+        if self._command_pending(self._target_command_records, target):
+            return
         target_record = self._new_command_record(target)
         self._target_command_records.append(target_record)
         self._sync_pending_views()

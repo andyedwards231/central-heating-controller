@@ -613,3 +613,28 @@ def test_entity_translations_are_complete_and_aligned() -> None:
     assert set(strings["entity"]["sensor"]["status"]["state"]) == {
         item.value for item in ControllerStatus
     }
+
+
+async def test_default_entity_ids_match_documented_dashboard_entities(hass, controller) -> None:
+    """Fresh installations expose the IDs used by the bundled card and README."""
+    entry, _ = controller
+    for platform, keys in (
+        ("number", (CONF_FALLBACK_MINUTES, CONF_MAX_WARMUP_MINUTES)),
+        ("sensor", ("preheat_start_time",)),
+    ):
+        for key in keys:
+            assert _entity_id(hass, entry, platform, key) == f"{platform}.{DOMAIN}_{key}"
+
+
+async def test_auto_switch_can_be_turned_off_while_thermostat_unavailable(
+    hass, controller_factory
+) -> None:
+    """Users can disable control before a missing thermostat returns."""
+    entry, coordinator = await controller_factory(include_climate=False)
+    entity_id = _entity_id(hass, entry, "switch", "auto_mode")
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": entity_id}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert coordinator.persistent_state.auto_mode is False
+    assert hass.states.get(entity_id).state == "off"

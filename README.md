@@ -11,13 +11,24 @@ configured according to their manufacturer guidance.
 
 ## Installation
 
+Requires Home Assistant Core 2026.9.3 or newer. The automated tests run against
+2026.9.3.
+
+For HACS, add `https://github.com/andyedwards231/central-heating-controller` as a
+custom repository of type **Integration**, download Central Heating Controller,
+and restart Home Assistant. Then add the integration in Settings → Devices & services.
+Updates are published as GitHub releases with matching manifest versions so HACS
+can detect them. Restart Home Assistant after installing an update.
+
+For manual installation:
+
 1. Copy `custom_components/central_heating_controller` into `<config>/custom_components/`.
 2. Restart Home Assistant.
 3. Open Settings → Devices & services → Add integration.
 4. Search for Central Heating Controller.
 5. Complete the setup flow for the thermostat you want this controller to manage.
 
-The integration manifest is intended for direct copy installation: it has an empty
+The integration manifest supports HACS and direct copy installation: it has an empty
 `requirements` list, `config_flow: true`, `integration_type: service`,
 `iot_class: local_push`, and a version number.
 
@@ -119,12 +130,12 @@ When nobody is home and the destination means home, the controller can pre-heat:
 
 - If `arrival_time_entity` is not configured, pre-heating starts immediately for a
   home journey.
-- If `arrival_time_entity` is configured and the entity exists but has an invalid,
-  unavailable, unknown, blank, or past ETA, pre-heating starts immediately.
-- If the configured ETA entity was removed or does not exist, a configured ETA
-  entity that is missing disables preheat.
-- In short: unconfigured or existing invalid ETA starts preheat immediately,
-  while a configured ETA entity that is missing disables preheat.
+- If `arrival_time_entity` is configured, an invalid, unavailable, unknown, blank,
+  past, or missing ETA blocks pre-heating. A configured ETA entity that is missing
+  disables preheat and creates a repair issue.
+- If a previously valid ETA becomes invalid or expires before anyone arrives,
+  pre-heating stops and the controller returns to the eco target, unless heat blast
+  or a manual override has priority.
 - If the ETA is valid and in the future, the controller calculates a pre-heat start
   time from the selected warm-up duration.
 - If the destination changes away from home, the pre-heat journey is cancelled.
@@ -135,6 +146,27 @@ uses the trusted learned heating rate, current temperature, high target, and
 `maximum_warmup_minutes` cap. Use the options flow and choose reset learning if you
 change heating hardware, radiator balancing, insulation, or anything else that
 would make the old learned rate misleading.
+
+Learning requires the thermostat to report `hvac_action: heating`. If it does not,
+the controller continues using the fallback warm-up duration. An unavailable
+thermostat breaks the current learning sample, so time spent offline is not
+counted as observed heating. ETA values may be ISO timestamps or Unix timestamps
+(including fractional seconds); timezone-free ISO values use Home Assistant's timezone.
+
+### Tado X
+
+Use the thermostat's `climate.*` entity exposed by Home Assistant's **Matter**
+integration and select `heat` as the active HVAC mode. The standard Tado integration
+does not support Tado X; see [Home Assistant's Tado documentation](https://www.home-assistant.io/integrations/tado/).
+
+The controller manages one climate entity per entry. Other Tado rooms or radiator
+valves are not automatically included. Matter heating-action reporting depends on
+the device, so check whether your entity exposes `hvac_action` before expecting
+adaptive learning. Changes from Tado schedules, the Tado app, or other automations
+are treated as external target changes and may activate manual override.
+
+The controller waits briefly for command acknowledgements before repeating a write.
+Its status describes the selected control policy, not proof that the boiler is firing.
 
 ## Dashboard Entities
 
@@ -183,8 +215,17 @@ Useful troubleshooting places:
   restore the missing entity or reconfigure the integration.
 
 If pre-heating does not start, check destination matching, the configured home zone
-friendly name, `destination_home_value`, and whether the ETA entity exists. Remember
-that destination changes away from home cancel the pre-heat path.
+friendly name, `destination_home_value`, and whether the configured ETA entity has
+a valid future timestamp. Destination changes away from home cancel the pre-heat path.
+
+## Development
+
+With Python 3.14 and uv installed, run `uv sync --frozen`, `uv run pytest`,
+`uv run ruff check .`, and `node --test tests/js/*.test.mjs`.
+The test suite includes real Home Assistant climate-service validation with
+simulated delayed thermostat reports. Physical Tado X behaviour still needs a
+check on the installed system: verify schedule high/low, an external manual target,
+Auto off, and invalid ETA handling before relying on unattended control.
 
 ## Removal
 
