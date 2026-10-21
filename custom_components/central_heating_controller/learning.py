@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 
 _MINIMUM_SAMPLE_DURATION = timedelta(minutes=15)
+_MAXIMUM_OBSERVATION_GAP = timedelta(minutes=30)
 _MAXIMUM_RATE = 10.0
 _TRUSTED_SAMPLE_COUNT = 3
 _NEW_SAMPLE_WEIGHT = 0.3
@@ -128,7 +129,11 @@ class HeatingRateLearner:
             self._last_observed_temperature = current
             return None
 
-        if self._last_observed_at is None or observed_at <= self._last_observed_at:
+        if (
+            self._last_observed_at is None
+            or observed_at <= self._last_observed_at
+            or observed_at - self._last_observed_at > _MAXIMUM_OBSERVATION_GAP
+        ):
             self._reset_window()
             return None
         if self._last_observed_temperature is None or current < self._last_observed_temperature:

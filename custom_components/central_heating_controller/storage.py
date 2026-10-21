@@ -110,6 +110,8 @@ class ControllerStore:
             manual_override_fingerprint=fingerprint,
             learned_rate=rate if learned_consistent else None,
             learned_sample_count=count if learned_consistent else 0,
+            thermal_model=raw.get("thermal_model", {}),
+            forecast_accuracy=raw.get("forecast_accuracy", {}),
         )
 
     async def async_save(self, state: PersistentState) -> None:
@@ -130,5 +132,7 @@ class ControllerStore:
                 ),
                 "learned_rate": state.learned_rate,
                 "learned_sample_count": state.learned_sample_count,
+                "thermal_model": state.thermal_model,
+                "forecast_accuracy": state.forecast_accuracy,
             }
         )

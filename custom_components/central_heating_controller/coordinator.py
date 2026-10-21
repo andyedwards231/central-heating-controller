@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 import logging
@@ -45,6 +45,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .config_flow import _climate_capabilities, _validate_settings
 from .const import (
@@ -61,11 +62,17 @@ from .const import (
     CONF_MAX_WARMUP_MINUTES,
     CONF_PERSONS,
     CONF_SCHEDULE,
+    CONF_WEATHER,
+    CONF_OUTDOOR_TEMP,
+    CONF_HEATING_ACTIVITY,
     HEAT_BLAST_MINUTES,
     NAME,
     OPT_RESET_LEARNING_REQUESTED,
 )
 from .learning import HeatingRateLearner
+from .forecasting import ThermalForecaster
+from .forecast_accuracy import ForecastAccuracyTracker
+from .forecast_inputs import ForecastInputs, _celsius
 from .models import (
     ControlInputs,
     ControllerSettings,
@@ -211,6 +218,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.store = ControllerStore(hass, entry.entry_id)
         self.persistent_state = PersistentState()
         self.learner = HeatingRateLearner()
+        self.thermal_model = ThermalForecaster()
+        self.forecast_inputs = ForecastInputs(hass)
+        self.forecast_accuracy = ForecastAccuracyTracker()
         self.pending_hvac_mode: str | None = None
         self.pending_target: float | None = None
         self._command_generation = 0
@@ -262,8 +272,17 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.persistent_state.learned_sample_count,
             )
 
+            stored_model = self.persistent_state.thermal_model
+            if isinstance(stored_model, dict) and stored_model.get("sources") == self._learning_sources():
+                self.thermal_model = ThermalForecaster.from_dict(stored_model)
+                self.forecast_accuracy = ForecastAccuracyTracker.from_dict(
+                    self.persistent_state.forecast_accuracy, now=dt_util.utcnow()
+                )
+
             if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
                 self.learner.reset()
+                self.thermal_model = ThermalForecaster()
+                self.forecast_accuracy = ForecastAccuracyTracker()
                 self._copy_learning_state()
                 await self.store.async_save(self.persistent_state)
                 options = dict(self.entry.options)
@@ -283,6 +302,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             ]
             if config.get(CONF_ARRIVAL_TIME):
                 entity_ids.append(config[CONF_ARRIVAL_TIME])
+            entity_ids.extend(config[key] for key in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY) if config.get(key))
             for entity_id in dict.fromkeys(entity_ids):
                 self._event_unsubscribers.append(
                     async_track_state_change_event(self.hass, entity_id, self._handle_state_change)
@@ -306,6 +326,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
         entity_id = event.data.get("entity_id")
+        if entity_id == self.config[CONF_SCHEDULE]:
+            self.forecast_inputs.invalidate_schedule(entity_id)
         old_state = old_state if isinstance(old_state, State) else None
         new_state = new_state if isinstance(new_state, State) else None
         transition_probe = _CapturedEvent(
@@ -719,9 +741,15 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 return True
         return not any_valid
 
+    def _learning_sources(self) -> list[str | None]:
+        """Prevent coefficients learnt in one room being reused with different sensors."""
+        return [self.config.get(key) for key in (CONF_CLIMATE, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY)]
+
     def _copy_learning_state(self) -> None:
         self.persistent_state.learned_rate = self.learner.rate
         self.persistent_state.learned_sample_count = self.learner.sample_count
+        self.persistent_state.thermal_model = self.thermal_model.to_dict() | {"sources": self._learning_sources()}
+        self.persistent_state.forecast_accuracy = self.forecast_accuracy.to_dict()
 
     async def _async_update_data(self) -> ControllerState:
         """Track a complete evaluation so shutdown can await it."""
@@ -794,9 +822,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             now,
             current_temperature,
             current_target,
-            thermostat_available
-            and climate is not None
-            and climate.attributes.get(ATTR_HVAC_ACTION) == "heating",
+            self._heating_active(climate) is True,
         )
         if learned is not None:
             self._copy_learning_state()
@@ -898,6 +924,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             warmup_minutes=warmup_minutes,
             temperature_capabilities=temperature_capabilities,
             auto_mode=self.persistent_state.auto_mode,
+            temperature_forecast=(self.data.temperature_forecast if self.data else {}),
         )
         if state != self.data:
             self.async_set_updated_data(state)
@@ -912,7 +939,178 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 climate, self.persistent_state.manual_override_target
             )
         self._stale_own_target_echo = False
+        if config.get(CONF_WEATHER) and config.get(CONF_OUTDOOR_TEMP):
+            forecast = await self._async_temperature_forecast(
+                now, state, climate, occupied, schedule_high, journey_home, preheat_ready
+            )
+            state = replace(state, temperature_forecast=forecast)
+            if state != self.data:
+                self.async_set_updated_data(state)
+                self._skip_duplicate_listener_update = True
         return state
+
+    def _heating_active(self, climate: State | None) -> bool | None:
+        """Keep the legacy net-rise learner limited to binary activity sources."""
+        demand = self._heating_demand(climate)
+        return demand if isinstance(demand, bool) else None
+
+    def _heating_demand(self, climate: State | None) -> bool | float | None:
+        """Read binary activity or a percentage demand, never infer it from HVAC mode."""
+        entity_id = self.config.get(CONF_HEATING_ACTIVITY)
+        if entity_id:
+            activity = self.hass.states.get(entity_id)
+            if activity is not None and self._available(activity):
+                if dt_util.utcnow() - activity.last_reported > timedelta(minutes=30):
+                    return None
+                value = activity.state.casefold()
+                if activity.attributes.get(ATTR_UNIT_OF_MEASUREMENT) == "%":
+                    try:
+                        percent = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        return None
+                    return percent / 100 if math.isfinite(percent) and 0 <= percent <= 100 else None
+                if value in ("on", "true", "heating"):
+                    return True
+                if value in ("off", "false", "idle"):
+                    return False
+            return None
+        if not self._available(climate) or climate is None:
+            return None
+        action = climate.attributes.get(ATTR_HVAC_ACTION)
+        if action == "heating":
+            return True
+        if action in ("idle", "off") or climate.state == "off":
+            return False
+        return None
+
+    async def _async_temperature_forecast(
+        self, now: datetime, state: ControllerState, climate: State | None,
+        occupied: bool, schedule_high: bool, journey_home: bool, preheat_ready: bool,
+    ) -> dict:
+        """Publish a conditional forecast without allowing weather failures to stop control."""
+        config = self.config
+        unit = (state.temperature_capabilities.unit if state.temperature_capabilities
+                else self.hass.config.units.temperature_unit)
+        indoor = _celsius(state.current_temperature, unit)
+        outside_state = self.hass.states.get(config[CONF_OUTDOOR_TEMP])
+        outside = (_celsius(outside_state.state, outside_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
+                   if outside_state else None)
+        if climate is not None and now - climate.last_reported > timedelta(hours=2):
+            indoor = None
+        if outside_state is not None and now - outside_state.last_reported > timedelta(hours=2):
+            outside = None
+        activity = self._heating_demand(climate)
+        # Score the actual sensor report, not a held value re-labelled as a new reading.
+        accuracy_changed = self.forecast_accuracy.observe(
+            climate.last_reported if climate is not None else now, indoor
+        )
+        # Learn independently of the forecast service's availability, using the
+        # observed thermostat setpoint rather than a command awaiting acknowledgement.
+        observed_target = (_celsius(climate.attributes.get(ATTR_TEMPERATURE), unit)
+                           if climate is not None and climate.state != "off" else None)
+        model_changed = self.thermal_model.observe(
+            now, indoor, outside, activity, target_temperature=observed_target
+        )
+        if model_changed or accuracy_changed:
+            self._copy_learning_state()
+            try:
+                await self.store.async_save(self.persistent_state)
+            except Exception:
+                _LOGGER.warning("Unable to persist thermal learning", exc_info=True)
+        base = {"forecast": [], "temperature_unit": unit, "confidence": "learning",
+                "forecast_accuracy": self.forecast_accuracy.metrics()}
+        if indoor is None:
+            return base | {"reason": "Thermostat temperature is unavailable or has not reported for over two hours"}
+        if self.settings.active_hvac_mode not in ("heat", "auto"):
+            return base | {"reason": "Temperature forecasting requires a heating HVAC mode"}
+        try:
+            inputs = await self.forecast_inputs.async_load(
+                now, config[CONF_WEATHER], config[CONF_OUTDOOR_TEMP], config[CONF_SCHEDULE]
+            )
+            if not inputs.available:
+                return base | {"reason": inputs.reason}
+            settings = self.settings
+            blast_until = self.persistent_state.blast_until
+            override = self.persistent_state.manual_override_target
+            override_valid = True
+
+            def target(at: datetime) -> float | None:
+                nonlocal override_valid
+                high = inputs.schedule_high(at)
+                ready = journey_home and (state.preheat_start_time is None and preheat_ready
+                                         or state.preheat_start_time is not None
+                                         and at >= state.preheat_start_time)
+                home = occupied or (state.arrival_time is not None and at >= state.arrival_time)
+                # Manual overrides end at the first policy transition and do not recur.
+                if (high, ready, home) != (schedule_high, preheat_ready, occupied):
+                    override_valid = False
+                result = evaluate_policy(ControlInputs(
+                    thermostat_available=True,
+                    auto_mode=self.persistent_state.auto_mode,
+                    blast_active=blast_until is not None and at < blast_until,
+                    manual_override_target=override if override_valid else None,
+                    occupied=home, schedule_high=high, journey_home=journey_home,
+                    preheat_ready=ready, current_temperature=None,
+                    high_temperature=settings.high_temperature,
+                    low_temperature=settings.low_temperature,
+                    eco_temperature=settings.eco_temperature,
+                    active_hvac_mode=settings.active_hvac_mode, evaluated_at=at,
+                ))
+                if result.hvac_mode == "off":
+                    return None
+                if result.hvac_mode is None and climate is not None and climate.state == "off":
+                    return None
+                return _celsius(result.target_temperature, unit)
+
+            prediction = self.thermal_model.forecast(now, indoor, inputs.outdoor_temperature, target)
+            if self.forecast_accuracy.issue(now, prediction.points):
+                self._copy_learning_state()
+                try:
+                    await self.store.async_save(self.persistent_state)
+                except Exception:
+                    _LOGGER.warning("Unable to persist forecast accuracy", exc_info=True)
+            def native(value: float | None) -> float | None:
+                return (round(TemperatureConverter.convert(value, "°C", unit), 2)
+                        if value is not None else None)
+            assumptions = [
+                "Predicts the thermostat location, not every room.",
+                "Current occupancy is held until any known home arrival; future departures are unknown.",
+                "Solar gains, open windows and changes in boiler output are not explicitly modelled.",
+                *inputs.assumptions,
+            ]
+            assumptions.append("Heating demand is a reported control signal, not measured boiler power.")
+            if not prediction.lag_learned:
+                assumptions.append("Heating response delay is still being learnt.")
+            if not prediction.demand_model_learned:
+                assumptions.append("Future demand uses an initial estimate until enough setpoint changes are observed.")
+            if activity is None:
+                assumptions.append("Heating activity/demand is missing or stale: learning is paused.")
+            return base | {
+                "forecast": [{"datetime": point.at.isoformat(),
+                              "temperature": native(point.indoor_temperature),
+                              "outdoor_temperature": native(point.outdoor_temperature),
+                              "target_temperature": native(point.target_temperature),
+                              "heating_demand_percent": round(point.demand * 100, 1)}
+                             for point in prediction.points],
+                "confidence": ("learned" if prediction.confidence >= 0.5
+                               and prediction.lag_learned and prediction.demand_model_learned
+                               and activity is not None else "learning"),
+                "model_score": prediction.confidence,
+                "heating_response_minutes": prediction.lag_minutes,
+                "heating_response_learned": prediction.lag_learned,
+                "demand_model_learned": prediction.demand_model_learned,
+                "current_heating_demand_percent": (round(float(activity) * 100, 1)
+                                                   if activity is not None else None),
+                "forecast_accuracy": self.forecast_accuracy.metrics(),
+                "learned_samples": prediction.learned_samples,
+                "model_residual_c_per_hour": prediction.residual_rate_c_per_hour,
+                "heat_gain_c_per_hour": prediction.heat_gain_c_per_hour,
+                "heat_loss_per_hour": prediction.heat_loss_per_hour,
+                "assumptions": assumptions,
+            }
+        except Exception:
+            _LOGGER.warning("Indoor temperature forecast unavailable", exc_info=True)
+            return base | {"reason": "Forecast inputs could not be processed"}
 
     async def _async_apply_commands(
         self, climate: State | None, desired_mode: str | None, desired_target: float | None
@@ -1022,6 +1220,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     async def async_reset_learning(self) -> None:
         """Clear the learned model and immediately re-evaluate."""
         self.learner.reset()
+        self.thermal_model = ThermalForecaster()
+        self.forecast_accuracy = ForecastAccuracyTracker()
         self._copy_learning_state()
         await self.store.async_save(self.persistent_state)
         await self.async_refresh()

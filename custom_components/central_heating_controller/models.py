@@ -1,6 +1,6 @@
 """Data models for the central heating controller."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -82,6 +82,8 @@ class PersistentState:
     manual_override_fingerprint: tuple[JsonPrimitive, ...] | None = None
     learned_rate: float | None = None
     learned_sample_count: int = 0
+    thermal_model: dict = field(default_factory=dict)
+    forecast_accuracy: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,7 @@ class ControllerState:
     warmup_minutes: float | int
     temperature_capabilities: TemperatureCapabilities | None = None
     auto_mode: bool = True
+    temperature_forecast: dict = field(default_factory=dict)
 
     @property
     def status(self) -> ControllerStatus:

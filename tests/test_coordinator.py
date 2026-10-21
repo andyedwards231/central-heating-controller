@@ -158,6 +158,8 @@ async def test_storage_round_trip_serializes_only_persistent_fields(hass) -> Non
         "manual_override_fingerprint": [True, None, "home", 17.0],
         "learned_rate": 1.25,
         "learned_sample_count": 4,
+        "thermal_model": {},
+        "forecast_accuracy": {},
     }
     assert "pending_target" not in save.await_args.args[0]
 

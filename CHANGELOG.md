@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.0 — 2026-10-21
+
+- Learn from percentage heating demand (including Tado Hall Heating Power) without
+  treating partial demand as continuously active full heating.
+- Learn thermal response time and retain residual heat in temperature forecasts;
+  estimate future demand from observed thermostat behaviour.
+- Preserve forecast-error history across restarts and score fresh temperature
+  reports, with MAE, bias and RMSE for 1-, 6- and 24-hour predictions.
+
+- Add a 24-hour indoor temperature forecast using hourly weather, live outdoor
+  temperature and the heating schedule, with persisted heating and cooling learning.
+- Add an optional actual-heating sensor for thermostats without HVAC activity.
+- Plot indoor predictions and targets in the control and visual Lovelace cards,
+  distinguishing uncalibrated estimates and showing measured forecast errors.
+- Respect occupancy, known arrivals, overrides, blast expiry and temperature units;
+  keep forecast failures separate from heating control.
+- Reject long telemetry gaps in the existing heating-rate learner.
+
+After updating through HACS, restart Home Assistant and configure the weather,
+outdoor temperature and heating activity/demand inputs. For the Hall Tado setup,
+select `sensor.hall_heating_power` as the activity/demand source. The initial
+forecast is uncalibrated until sufficient heating and cooling data is collected.
+
+Also replace `/config/www/central-heating-controller-card.js` with the JavaScript
+asset from this release and use `/local/central-heating-controller-card.js?v=1.2.0`
+as the dashboard resource URL. HACS integration updates do not copy this optional
+card into `/config/www` automatically.
+
 ## 1.1.0 — 2026-10-03
 
 Requires Home Assistant Core 2026.9.3 or newer.

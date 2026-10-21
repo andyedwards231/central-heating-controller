@@ -312,3 +312,14 @@ def test_warmup_fallback_for_unavailable_values_and_ceil_for_trusted_model() -> 
 def test_warmup_rejects_invalid_durations(fallback: float, maximum: float) -> None:
     with pytest.raises(ValueError):
         HeatingRateLearner().warmup_minutes(18.0, 20.0, fallback, maximum)
+
+
+def test_heating_rate_does_not_learn_across_unobserved_gap():
+    """A long telemetry gap is not evidence of continuously active heating."""
+    from datetime import datetime, timedelta, timezone
+
+    learner = HeatingRateLearner()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    learner.observe(now, 15, 20, True)
+    assert learner.observe(now + timedelta(hours=2), 19, 20, True) is None
+    assert learner.sample_count == 0

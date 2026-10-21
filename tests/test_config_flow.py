@@ -53,6 +53,9 @@ BASE_INPUT = {
     CONF_SCHEDULE: SCHEDULE,
     CONF_DESTINATION: DESTINATION,
     CONF_ARRIVAL_TIME: ARRIVAL_TIME,
+    "weather_entity": None,
+    "outdoor_temperature_entity": None,
+    "heating_activity_entity": None,
 }
 
 SETTINGS_INPUT = {
@@ -714,3 +717,36 @@ def test_translation_files_are_valid_and_structurally_match() -> None:
         "warmup_order",
         "already_configured",
     } <= strings["config"]["error"].keys()
+
+
+@pytest.mark.asyncio
+async def test_forecast_sources_and_boolean_sensor_are_saved(hass: HomeAssistant) -> None:
+    """Forecasting is configured explicitly, including legacy boolean sensor states."""
+    _set_required_states(hass)
+    hass.states.async_set("weather.home", "cloudy", {"temperature_unit": "°C"})
+    hass.states.async_set("sensor.outdoor", "8", {"device_class": "temperature", "unit_of_measurement": "°C"})
+    hass.states.async_set("sensor.boiler_running", "True")
+    sources = BASE_INPUT | {
+        "weather_entity": "weather.home",
+        "outdoor_temperature_entity": "sensor.outdoor",
+        "heating_activity_entity": "sensor.boiler_running",
+    }
+    result = await _reach_settings(hass, sources)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input=SETTINGS_INPUT
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["weather_entity", "outdoor_temperature_entity", "heating_activity_entity"])
+async def test_missing_optional_forecast_source_is_rejected(hass: HomeAssistant, field: str) -> None:
+    _set_required_states(hass)
+    result = await _start_user_flow(hass)
+    domain = "weather" if field == "weather_entity" else "sensor"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input=BASE_INPUT | {field: f"{domain}.missing"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {field: "entity_not_found"}

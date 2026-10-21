@@ -15,7 +15,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js?v=1.1.0
+url: /local/central-heating-controller-card.js?v=1.2.0
 type: module
 ```
 
@@ -34,6 +34,19 @@ type: custom:central-heating-controller-card
 entity: sensor.central_heating_controller_status
 mode: visual
 ```
+
+The visual card includes a responsive 24-hour indoor temperature forecast when
+the integration's `sensor.<base>_indoor_temperature_forecast` entity is
+available. It plots predicted indoor temperature and target temperature, shows
+the local-time range and unit, and lists forecast assumptions. The control
+card also shows the chart. While the controller is learning, any available
+estimate remains visible with an uncalibrated label. The card shows current
+reported heating demand and either the learned heating response time or a
+learning label. The response time is an exponential time constant: it describes
+the time to reach about 63% of the effect of a demand change. Forecast mean
+errors and sample counts appear for each populated 1-hour, 6-hour, and 24-hour
+horizon. To use a renamed entity, add `indoor_temperature_forecast` under
+`entities`.
 
 ## Settings Card
 

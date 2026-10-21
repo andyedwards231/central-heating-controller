@@ -11,6 +11,7 @@ const ENTITY_SUFFIXES = {
   effectiveTarget: ["sensor", "effective_target_temperature", "effective_target_temperature"],
   learnedRate: ["sensor", "learned_heating_rate", "learned_heating_rate"],
   preheatStart: ["sensor", "preheat_start_time", "preheat_start_time"],
+  indoorTemperatureForecast: ["sensor", "indoor_temperature_forecast", "indoor_temperature_forecast"],
 };
 
 // Existing entity registries retain names created by releases before 1.1.0.
@@ -262,6 +263,7 @@ class CentralHeatingControllerCard extends HTMLElement {
           ${this._renderNumberControl("Low", this._entities.lowTemperature)}
           ${this._renderNumberControl("Eco", this._entities.ecoTemperature)}
         </div>
+        ${this._renderForecast()}
         ${reason}
         ${manual}
       </ha-card>
@@ -311,6 +313,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     const arrival = this._formatTime(attributes.arrival_time);
     const learned = this._formatEntity(this._entities.learnedRate);
     const statusLabel = this._statusLabel(status?.state);
+    const forecast = this._renderForecast();
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
@@ -342,6 +345,7 @@ class CentralHeatingControllerCard extends HTMLElement {
           ${this._renderMetric("Arrival", arrival)}
           ${this._renderMetric("Learned rate", learned)}
         </div>
+        ${forecast}
         <div class="chc-actions">
           <button type="button" data-action="auto">${this._autoModeLabel()}</button>
           <button type="button" data-action="blast" class="chc-hot">Heat Blast</button>
@@ -350,6 +354,122 @@ class CentralHeatingControllerCard extends HTMLElement {
       </ha-card>
     `;
     this._bindActions();
+  }
+
+  _renderForecast() {
+    const state = this._state(this._entities.indoorTemperatureForecast);
+    const attrs = state?.attributes || {};
+    const rows = Array.isArray(attrs.forecast) ? attrs.forecast
+      .filter((point) => point && typeof point === "object")
+      .map((point) => ({
+        time: new Date(point.datetime).getTime(),
+        temperature: this._finiteNumber(point.temperature),
+        target: this._finiteNumber(point.target_temperature),
+      }))
+      .filter((point) => Number.isFinite(point.time) && point.temperature !== null)
+      .sort((a, b) => a.time - b.time) : [];
+    const unit = attrs.temperature_unit || "°C";
+    const confidence = attrs.confidence;
+    const reason = attrs.reason;
+    let content;
+
+    if (rows.length) {
+      const width = 600, height = 220, left = 48, right = 12, top = 12, bottom = 34;
+      const times = rows.map((p) => p.time);
+      const values = rows.flatMap((p) => p.target === null ? [p.temperature] : [p.temperature, p.target]);
+      const tMin = times[0], tMax = times[times.length - 1] || tMin + 1;
+      let vMin = Math.min(...values), vMax = Math.max(...values);
+      const pad = Math.max((vMax - vMin) * 0.15, 0.5);
+      vMin -= pad; vMax += pad;
+      const x = (time) => left + (time - tMin) / (tMax - tMin || 1) * (width - left - right);
+      const y = (value) => top + (vMax - value) / (vMax - vMin) * (height - top - bottom);
+      const pathFor = (key, step = false) => {
+        const chunks = [];
+        let prior = null;
+        for (const point of rows) {
+          const value = point[key];
+          if (value === null) { prior = null; continue; }
+          const px = x(point.time).toFixed(1), py = y(value).toFixed(1);
+          if (!prior) chunks.push(`M${px},${py}`);
+          else if (step) chunks.push(`L${px},${y(prior[key]).toFixed(1)} L${px},${py}`);
+          else chunks.push(`L${px},${py}`);
+          prior = point;
+        }
+        return chunks.join(" ");
+      };
+      const ticks = [0, 1, 2].map((i) => {
+        const value = vMin + (vMax - vMin) * i / 2;
+        const yy = y(value);
+        return `<g><line x1="${left}" y1="${yy}" x2="${width-right}" y2="${yy}" class="chc-chart-grid"/><text x="${left-7}" y="${yy+4}" text-anchor="end">${value.toFixed(1)} ${this._escape(unit)}</text></g>`;
+      }).join("");
+      const formatAxisTime = (value) => {
+        const date = new Date(value);
+        return `${date.toLocaleDateString([], { weekday: "short" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      };
+      const first = formatAxisTime(tMin);
+      const last = formatAxisTime(tMax);
+      const timeTicks = [];
+      const interval = 6 * 60 * 60 * 1000;
+      const axisTick = (time, includeDay = false) => {
+        const date = new Date(time);
+        const label = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const day = date.toLocaleDateString([], { weekday: "short" });
+        const previousDay = new Date(time - interval).toLocaleDateString([], { weekday: "short" });
+        const tickLabel = includeDay || day !== previousDay ? `${day} ${label}` : label;
+        return `<g><line x1="${x(time)}" y1="${top}" x2="${x(time)}" y2="${height-bottom}" class="chc-chart-grid chc-chart-vgrid"/><text x="${x(time)}" y="${height-17}" text-anchor="middle">${this._escape(tickLabel)}</text></g>`;
+      };
+      timeTicks.push(axisTick(tMin, true));
+      for (let time = Math.ceil(tMin / interval) * interval; time < tMax; time += interval) {
+        if (time > tMin) timeTicks.push(axisTick(time));
+      }
+      content = `<div class="chc-chart-wrap">
+        <svg class="chc-chart" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chc-chart-title chc-chart-desc">
+          <title id="chc-chart-title">Indoor temperature forecast for the next 24 hours</title>
+          <desc id="chc-chart-desc">Predicted indoor temperature and target temperature, in ${this._escape(unit)}, from ${this._escape(first)} to ${this._escape(last)} local time.</desc>
+          ${ticks}${timeTicks.join("")}
+          <path d="${pathFor("temperature")}" class="chc-chart-line chc-chart-indoor"/><path d="${pathFor("target", true)}" class="chc-chart-line chc-chart-target"/>
+        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>Indoor forecast</span><span><i class="chc-legend-target"></i>Target</span></div>
+      </div>`;
+    } else if (confidence === "learning") {
+      content = `<div class="chc-forecast-state">${this._escape(reason || "Learning your home’s heating response. A forecast will appear when enough data is available.")}</div>`;
+    } else {
+      content = `<div class="chc-forecast-state">${this._escape(reason || (!state || ["unknown", "unavailable"].includes(state.state) ? "Forecast is unavailable." : "A 24-hour forecast is not available yet."))}</div>`;
+    }
+    const learning = confidence === "learning" && rows.length
+      ? `<div class="chc-forecast-state is-learning">Uncalibrated estimate — learning your home’s heating response.</div>` : "";
+    const endpoint = state && Number.isFinite(Number(state.state))
+      ? `<div class="chc-forecast-endpoint">In 24 hours <strong>${this._escape(this._formatNumber(state.state, unit))}</strong></div>` : "";
+    const assumptions = Array.isArray(attrs.assumptions) && attrs.assumptions.length
+      ? `<ul class="chc-forecast-assumptions">${attrs.assumptions.map((item) => `<li>${this._escape(item)}</li>`).join("")}</ul>` : "";
+    const accuracyNotes = ["1h", "6h", "24h"].flatMap((horizon) => {
+      const accuracy = attrs.forecast_accuracy?.[horizon];
+      const errorC = this._finiteNumber(accuracy?.mae_c);
+      const count = this._finiteNumber(accuracy?.count);
+      if (errorC === null || errorC < 0 || count === null || count <= 0) return [];
+      const error = unit === "°F" ? errorC * 9 / 5 : errorC;
+      const label = horizon === "1h" ? "1-hour" : horizon === "6h" ? "6-hour" : "24-hour";
+      return [`<span>Mean ${label} error: ${this._escape(this._formatNumber(error, unit))} (${this._escape(count)} checks)</span>`];
+    }).join('<span aria-hidden="true"> · </span>');
+    const accuracyNote = accuracyNotes ? `<div class="chc-forecast-note chc-accuracy">${accuracyNotes}</div>` : "";
+    const demand = this._finiteNumber(attrs.current_heating_demand_percent);
+    const demandNote = demand !== null && demand >= 0 && demand <= 100
+      ? `<span>Current reported demand: ${this._escape(this._formatNumber(demand, "%"))}</span>` : "";
+    const responseMinutes = this._finiteNumber(attrs.heating_response_minutes);
+    const responseNote = attrs.heating_response_learned === true && responseMinutes === 0
+      ? `<span title="Time to reach about 63% of the effect of a demand change">Heating response: immediate</span>`
+      : attrs.heating_response_learned === true && responseMinutes !== null && responseMinutes > 0
+        ? `<span title="Time to reach about 63% of the effect of a demand change">Heating response: ~${this._escape(this._formatNumber(responseMinutes, "min").replace(/\.0 min$/, " min"))}</span>`
+        : attrs.heating_response_learned === false
+        ? "<span>Learning heating response</span>" : "";
+    const modelNotes = [demandNote, responseNote].filter(Boolean).join('<span aria-hidden="true"> · </span>');
+    const modelNote = modelNotes ? `<div class="chc-forecast-note chc-model-note">${modelNotes}</div>` : "";
+    return `<section class="chc-forecast" aria-label="Indoor temperature forecast"><div class="chc-section-title">Next 24 hours</div>${learning}${content}${endpoint}${reason && rows.length ? `<div class="chc-forecast-note">${this._escape(reason)}</div>` : ""}${modelNote}${accuracyNote}${assumptions}</section>`;
+  }
+
+  _finiteNumber(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
   }
 
   _autoModeLabel() {
@@ -543,6 +663,26 @@ class CentralHeatingControllerCard extends HTMLElement {
         gap: 10px;
         padding: 8px 18px 18px;
       }
+      .chc-forecast { padding: 0 18px 18px; }
+      .chc-chart-wrap { min-width: 0; }
+      .chc-chart { display: block; width: 100%; height: auto; overflow: visible; color: var(--secondary-text-color, #667085); font-family: inherit; font-size: 11px; }
+      .chc-chart text { fill: currentColor; }
+      .chc-chart-grid { stroke: var(--divider-color, rgba(127, 127, 127, 0.25)); stroke-width: 1; }
+      .chc-chart-vgrid { stroke-dasharray: 2 4; opacity: 0.65; }
+      .chc-chart-line { fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+      .chc-chart-indoor { stroke: var(--primary-color, #03a9f4); }
+      .chc-chart-target { stroke: var(--warning-color, #e59b16); stroke-dasharray: 6 5; }
+      .chc-chart-dot { fill: var(--primary-color, #03a9f4); }
+      .chc-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--secondary-text-color, #667085); font-size: 11px; }
+      .chc-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+      .chc-chart-legend i { display: inline-block; width: 15px; border-top: 3px solid var(--primary-color, #03a9f4); }
+      .chc-chart-legend .chc-legend-target { border-color: var(--warning-color, #e59b16); border-top-style: dashed; }
+      .chc-forecast-state, .chc-forecast-note { color: var(--secondary-text-color, #667085); font-size: 12px; line-height: 1.45; }
+      .chc-accuracy, .chc-model-note { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 6px; }
+      .chc-forecast-state.is-learning { margin-bottom: 7px; color: var(--warning-color, #9a6700); font-weight: 700; }
+      .chc-forecast-endpoint { margin-top: 8px; color: var(--secondary-text-color, #667085); font-size: 12px; }
+      .chc-forecast-endpoint strong { margin-left: 5px; color: var(--primary-text-color, #1f2933); }
+      .chc-forecast-assumptions { margin: 8px 0 0; padding-left: 18px; color: var(--secondary-text-color, #667085); font-size: 11px; line-height: 1.45; }
       .chc-metric {
         min-width: 0;
         border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.22));

@@ -42,6 +42,9 @@ from .const import (
     CONF_PERSONS,
     CONF_RESET_LEARNING,
     CONF_SCHEDULE,
+    CONF_WEATHER,
+    CONF_OUTDOOR_TEMP,
+    CONF_HEATING_ACTIVITY,
     DEFAULT_ECO_C,
     DEFAULT_ECO_F,
     DEFAULT_FALLBACK_MINUTES,
@@ -130,6 +133,15 @@ def _entity_schema() -> vol.Schema:
             ),
             vol.Required(CONF_DESTINATION): selector.EntitySelector(),
             vol.Optional(CONF_ARRIVAL_TIME): _NullableEntitySelector(),
+            vol.Optional(CONF_WEATHER): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain="weather")
+            ),
+            vol.Optional(CONF_OUTDOOR_TEMP): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            ),
+            vol.Optional(CONF_HEATING_ACTIVITY): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
+            ),
         }
     )
 
@@ -211,6 +223,9 @@ def _normalize_entity_input(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_SCHEDULE: user_input[CONF_SCHEDULE],
         CONF_DESTINATION: user_input[CONF_DESTINATION],
         CONF_ARRIVAL_TIME: user_input.get(CONF_ARRIVAL_TIME) or None,
+        CONF_WEATHER: user_input.get(CONF_WEATHER) or None,
+        CONF_OUTDOOR_TEMP: user_input.get(CONF_OUTDOOR_TEMP) or None,
+        CONF_HEATING_ACTIVITY: user_input.get(CONF_HEATING_ACTIVITY) or None,
     }
 
 
@@ -238,6 +253,10 @@ def _validate_entities(
     )
     for field, entity_ids in checks:
         if any(hass.states.get(entity_id) is None for entity_id in entity_ids):
+            return {field: "entity_not_found"}, None
+
+    for field in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY):
+        if user_input.get(field) and hass.states.get(user_input[field]) is None:
             return {field: "entity_not_found"}, None
 
     climate = user_input[CONF_CLIMATE]

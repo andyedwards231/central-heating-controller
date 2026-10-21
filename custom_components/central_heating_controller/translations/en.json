@@ -50,6 +50,9 @@
       },
       "preheat_start_time": {
         "name": "Pre-heat start time"
+      },
+      "indoor_temperature_forecast": {
+        "name": "Indoor temperature forecast"
       }
     }
   },
@@ -64,7 +67,10 @@
           "home_zone_entity": "Home zone",
           "schedule_entity": "Heating schedule",
           "destination_entity": "Destination",
-          "arrival_time_entity": "Arrival time (optional)"
+          "arrival_time_entity": "Arrival time (optional)",
+          "weather_entity": "Weather forecast (optional, hourly forecasts required)",
+          "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
+          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)"
         }
       },
       "settings": {
@@ -117,7 +123,10 @@
           "home_zone_entity": "Home zone",
           "schedule_entity": "Heating schedule",
           "destination_entity": "Destination",
-          "arrival_time_entity": "Arrival time (optional)"
+          "arrival_time_entity": "Arrival time (optional)",
+          "weather_entity": "Weather forecast (optional, hourly forecasts required)",
+          "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
+          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)"
         }
       },
       "settings": {
@@ -131,7 +140,7 @@
           "fallback_warmup_minutes": "Fallback warm-up duration",
           "maximum_warmup_minutes": "Maximum warm-up duration",
           "destination_home_value": "Destination value meaning home (optional)",
-          "reset_learning": "Reset learned heating rate"
+          "reset_learning": "Reset heating and cooling learning"
         }
       }
     },

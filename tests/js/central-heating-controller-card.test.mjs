@@ -227,3 +227,145 @@ test("explicit entity overrides take priority over legacy detection", () => {
   } });
   assert.equal(card._entities.fallbackWarmup, "number.custom_fallback");
 });
+
+test("visual mode renders a responsive indoor and target forecast chart", () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      entity_id: "sensor.central_heating_controller_indoor_temperature_forecast",
+      state: "19.2",
+      attributes: {
+        confidence: "learned", temperature_unit: "°C", reason: "Weather data included",
+        assumptions: ["Heating remains enabled"],
+        forecast: [
+          { datetime: "2026-06-29T12:00:00+01:00", temperature: 18, target_temperature: 19, outdoor_temperature: 12 },
+          { datetime: "2026-06-30T12:00:00+01:00", temperature: 19.2, target_temperature: 20, outdoor_temperature: 10 },
+        ],
+      },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "visual" });
+  card.hass = hass;
+
+  assert.match(card.shadowRoot.innerHTML, /Indoor temperature forecast for the next 24 hours/);
+  assert.match(card.shadowRoot.innerHTML, /chc-chart-indoor/);
+  assert.match(card.shadowRoot.innerHTML, /chc-chart-target/);
+  assert.match(card.shadowRoot.innerHTML, /In 24 hours/);
+  assert.match(card.shadowRoot.innerHTML, /Heating remains enabled/);
+  assert.match(card.shadowRoot.innerHTML, /local time/);
+});
+
+test("forecast entity can be overridden and learning state is explained", () => {
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "visual", entities: {
+    indoor_temperature_forecast: "sensor.custom_forecast",
+  } });
+  card.hass = createHass({ states: { "sensor.custom_forecast": {
+    entity_id: "sensor.custom_forecast", state: "unknown", attributes: { confidence: "learning" },
+  } } });
+  assert.equal(card._entities.indoorTemperatureForecast, "sensor.custom_forecast");
+  assert.match(card.shadowRoot.innerHTML, /Learning your home’s heating response/);
+});
+
+test("keeps a learning estimate visible with local date ticks and recent accuracy", () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      entity_id: "sensor.central_heating_controller_indoor_temperature_forecast",
+      state: "19",
+      attributes: {
+        confidence: "learning", temperature_unit: "°C", reason: "Model is still calibrating",
+        forecast_accuracy: { "1h": { mae_c: 0.4, count: 3 } },
+        forecast: [
+          { datetime: "2026-06-29T12:00:00+01:00", temperature: 18, target_temperature: 19, outdoor_temperature: 10 },
+          { datetime: "2026-06-29T18:00:00+01:00", temperature: 18.5, target_temperature: null, outdoor_temperature: 9 },
+          { datetime: "2026-06-30T12:00:00+01:00", temperature: 19, target_temperature: 20, outdoor_temperature: 8 },
+          null,
+          { datetime: "2026-06-30T18:00:00+01:00", temperature: "bad", target_temperature: 20 },
+        ],
+      },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "control" });
+  card.hass = hass;
+
+  assert.match(card.shadowRoot.innerHTML, /Uncalibrated estimate/);
+  assert.match(card.shadowRoot.innerHTML, /chc-chart-indoor/);
+  assert.match(card.shadowRoot.innerHTML, /chc-chart-vgrid/);
+  assert.match(card.shadowRoot.innerHTML, /Mean 1-hour error: 0\.4 °C \(3 checks\)/);
+  assert.match(card.shadowRoot.innerHTML, /line x1="48" y1="12" x2="48"/);
+  assert.match(card.shadowRoot.innerHTML, /Next 24 hours/);
+  assert.doesNotMatch(card.shadowRoot.innerHTML, /NaN/);
+});
+
+test("shows reported demand, learned response time, and all populated accuracy horizons", () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "sensor.central_heating_controller_status": {
+      entity_id: "sensor.central_heating_controller_status", state: "pre_heating",
+      attributes: {},
+    },
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      entity_id: "sensor.central_heating_controller_indoor_temperature_forecast", state: "unknown",
+      attributes: {
+        temperature_unit: "°F",
+        current_heating_demand_percent: 0, heating_response_minutes: 20,
+        heating_response_learned: true, demand_model_learned: true,
+        forecast_accuracy: {
+          "1h": { mae_c: 0.5, count: 2 },
+          "6h": { mae_c: 1, count: 4 },
+          "24h": { mae_c: 1.5, count: 6 },
+        },
+      },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "control" });
+  card.hass = hass;
+
+  assert.match(card.shadowRoot.innerHTML, /Current reported demand: 0\.0 %/);
+  assert.match(card.shadowRoot.innerHTML, /Heating response: ~20 min/);
+  assert.match(card.shadowRoot.innerHTML, /title="Time to reach about 63% of the effect of a demand change"/);
+  assert.match(card.shadowRoot.innerHTML, /Mean 1-hour error: 0\.9 °F \(2 checks\)/);
+  assert.match(card.shadowRoot.innerHTML, /Mean 6-hour error: 1\.8 °F \(4 checks\)/);
+  assert.match(card.shadowRoot.innerHTML, /Mean 24-hour error: 2\.7 °F \(6 checks\)/);
+});
+
+test("shows heating response learning state and skips missing or invalid model and accuracy values", () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "sensor.central_heating_controller_status": {
+      entity_id: "sensor.central_heating_controller_status", state: "pre_heating",
+      attributes: {},
+    },
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      entity_id: "sensor.central_heating_controller_indoor_temperature_forecast", state: "unknown",
+      attributes: {
+        current_heating_demand_percent: null, heating_response_minutes: "NaN",
+        heating_response_learned: false, demand_model_learned: false,
+        forecast_accuracy: {
+          "1h": { mae_c: 0.4, count: 0 },
+          "6h": { mae_c: "NaN", count: 3 },
+          "24h": { mae_c: null, count: 2 },
+        },
+      },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "control" });
+  card.hass = hass;
+
+  assert.match(card.shadowRoot.innerHTML, /Learning heating response/);
+  assert.doesNotMatch(card.shadowRoot.innerHTML, /Current reported demand|Heating response: ~|Mean (1-hour|6-hour|24-hour) error|NaN/);
+});
+
+test("shows an immediate response when a learned response time is zero", () => {
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status", mode: "control" });
+  card.hass = createHass({ states: {
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      entity_id: "sensor.central_heating_controller_indoor_temperature_forecast", state: "unknown",
+      attributes: { heating_response_minutes: 0, heating_response_learned: true },
+    },
+  } });
+
+  assert.match(card.shadowRoot.innerHTML, /Heating response: immediate/);
+});

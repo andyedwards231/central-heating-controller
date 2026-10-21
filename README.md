@@ -241,3 +241,95 @@ For safe removal:
 Removal unloads the controller and clears repair issues for that entry. It does
 not delete your thermostat, people, zone, schedule helper, destination sensor, ETA
 sensor, or other Home Assistant entities.
+
+## Indoor temperature forecast
+
+In the integration's **Configure** flow, select a weather entity providing hourly
+forecasts and a live outdoor temperature sensor. These are optional additions, so
+existing installations keep working without reconfiguration. The integration reads
+`weather.get_forecasts` and `schedule.get_schedule`; no extra automation or chart
+library is needed. Both Celsius and Fahrenheit inputs are supported.
+
+The new **Indoor temperature forecast** sensor contains a 24-hour forecast at
+five-minute intervals in its `forecast` attribute; its state is the predicted
+indoor temperature in 24 hours. The bundled Lovelace card plots the indoor curve
+and the controller's target. Update the card JavaScript as well as the integration
+when installing this change, and refresh the browser resource cache.
+
+For Andy's installation, the selected sources are `weather.forecast_home`,
+`sensor.hue_outdoor_motion_sensor_temperature`, and
+`climate.hallway_hall_tado_x`. Select these in Configure after installing; this
+change does not modify the live Home Assistant configuration.
+
+### Learning and accuracy
+
+Select `sensor.hall_heating_power` in **Heating activity or demand** for Andy's
+installation. A sensor reporting a `%` unit is interpreted as 0–100% demand:
+13% becomes 0.13, not full-power heating. Invalid, unavailable, out-of-range or
+more-than-30-minute-old demand pauses learning. Binary sensors and sensors with
+`on`/`off`, `True`/`False` or `heating`/`idle` remain supported. Without a selected
+source the thermostat's `hvac_action` is used when available.
+
+Reported demand is a control signal, not a measurement of gas use or boiler heat
+output. The model learns its relationship to observed temperature changes. The
+Hall Tado X does not expose `hvac_action`; its old `sensor.is_central_heating_on`
+template points at `climate.room_1` and should not be used for this installation.
+The percentage source allows useful learning without a separate boiler relay
+sensor, but accuracy must still be checked in the house.
+
+The thermal model learns heat gain, heat loss and how quickly a change in demand
+affects the room. It compares response times of 0, 5, 10, 20, 40 and 60 minutes,
+using earlier observation windows for fitting and later windows for validation.
+A nonzero response time must improve on the immediate-response model before it
+is used. This represents heat building up and residual warmth after demand falls;
+it is an exponential response time, not a literal period during which nothing
+happens. About 63% of a demand change's effect is reached after one response time.
+
+Observations are aggregated into 15-minute windows. The model retains up to
+1,000 windows, uses bounded coefficients and reduces the influence of outliers.
+Future demand is estimated from the temperature target and the observed demand
+behaviour. Before sufficient varied observations exist, the card labels the
+forecast uncalibrated rather than presenting assumptions as learnt facts.
+
+Learning and forecast-error history survive restarts. Changing the thermostat,
+outdoor sensor or demand/activity source starts fresh learning and accuracy
+tracking. The reset-learning option clears both. The new thermal model's storage
+format is version 2; previous version-1 thermal samples are discarded because
+they contain no response-delay information. This does not discard control
+settings or the separate legacy warm-up-rate learner.
+
+The forecast integrates heat flow every minute and publishes points every five
+minutes for the next 24 hours. The outdoor forecast is anchored to the live
+outdoor reading, with that correction fading over three hours. Weekly schedules
+use Home Assistant's local time zone, including clock changes. Occupancy remains
+as it is now until a known home arrival; blast expiry, manual override expiry
+and preheating follow the existing controller policy. Future departures cannot
+be inferred. Forecasting does not change the thermostat's control policy or start
+heating early for scheduled high periods. The legacy warm-up estimator only
+learns from binary activity; with a percentage source it retains its existing
+estimate or configured fallback rather than treating partial demand as full heat.
+
+The card shows reported demand, learned response time, and mean absolute error
+for 1-, 6- and 24-hour forecasts once enough time has elapsed to score them. The
+sensor's `forecast_accuracy` attribute additionally includes signed bias
+(actual minus predicted) and root-mean-square error, all in Celsius, plus sample
+counts. One forecast cohort is retained per hour; each horizon retains up to
+168 measured errors. Only fresh indoor sensor reports at or up to five minutes
+after the predicted timestamp are scored. Reusing an old temperature on a
+coordinator refresh does not count as a fresh observation. Sparse sensor reports
+may therefore leave some forecasts unscored. Pending forecasts and errors are
+persisted; expired scoring windows are dropped on restart.
+
+Measured errors include the effects of later weather, occupancy and manual-control
+changes. The model score is a learning-quality heuristic, not a statistical
+probability. Model residuals are in °C/hour, not a guarantee of 24-hour accuracy.
+
+This is a single-zone estimate of the thermostat location. Solar gains, opening
+windows, changing boiler output and differences between rooms are not explicitly
+represented. Assess accuracy over representative heating and cooling days.
+Synthetic tests verify learning and simulation, but do not establish real-house
+accuracy. Missing weather/schedule data produces a forecast error without
+preventing thermostat control. Input requests are cached for 15 minutes with
+bounded failure retries; schedule state changes invalidate its cache immediately.
+The full curve is excluded from recorder attributes to avoid storing a large
+chart payload every minute.

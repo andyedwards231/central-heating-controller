@@ -57,6 +57,7 @@ async def async_setup_entry(
             ControllerEffectiveTargetSensor(coordinator, entry.entry_id),
             ControllerLearnedRateSensor(coordinator, entry.entry_id),
             ControllerPreheatStartSensor(coordinator, entry.entry_id),
+            ControllerTemperatureForecastSensor(coordinator, entry.entry_id),
         )
     )
 
@@ -160,3 +161,31 @@ class ControllerPreheatStartSensor(ControllerEntity, SensorEntity):
     def native_value(self) -> datetime | None:
         """Return the calculated pre-heat start."""
         return self.coordinator.data.preheat_start_time
+
+
+class ControllerTemperatureForecastSensor(ControllerEntity, SensorEntity):
+    """Forecast temperature at +24h with the full curve in attributes."""
+
+    _unrecorded_attributes = frozenset({"forecast", "assumptions"})
+
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id, SensorEntityDescription(
+            key="indoor_temperature_forecast", translation_key="indoor_temperature_forecast",
+            device_class=SensorDeviceClass.TEMPERATURE, suggested_display_precision=1,
+        ))
+
+    @property
+    def native_value(self) -> float | None:
+        points = self.coordinator.data.temperature_forecast.get("forecast", [])
+        return points[-1]["temperature"] if points else None
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return self.thermostat_temperature_unit
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.data.temperature_forecast or {
+            "forecast": [], "confidence": "learning",
+            "reason": "Select a weather forecast and outdoor temperature sensor in integration options",
+        }
