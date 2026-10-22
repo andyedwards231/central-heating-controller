@@ -369,3 +369,58 @@ test("shows an immediate response when a learned response time is zero", () => {
 
   assert.match(card.shadowRoot.innerHTML, /Heating response: immediate/);
 });
+
+const ForecastCard = customElements.get("central-heating-forecast-card");
+function kiosk(points, extra = {}) {
+  const card = new ForecastCard();
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = createHass({ states: {
+    "sensor.central_heating_controller_indoor_temperature_forecast": {
+      state: "19", attributes: { forecast: points, confidence: "learning", ...extra },
+    },
+  } });
+  return card;
+}
+const forecastPoint = (minute, demand, target = 20) => ({
+  datetime: new Date(Date.UTC(2026, 9, 24, 23, minute)).toISOString(),
+  temperature: 18 + minute / 100, target_temperature: target, heating_demand_percent: demand,
+});
+
+test("kiosk shows live current/target and chart without controls or technical diagnostics", () => {
+  const card = kiosk([forecastPoint(0, 13), forecastPoint(5, 0)]);
+  const html = card.shadowRoot.innerHTML;
+  assert.match(html, /16.8 °C/);
+  assert.match(html, /20.0 °C/);
+  assert.match(html, /Early estimate/);
+  assert.match(html, /<svg/);
+  assert.match(html, /Heating expected/);
+  assert.doesNotMatch(html, /<button|Uncalibrated|model_score|Mean 1-hour|Solar gains/);
+});
+
+test("heating shading follows demand intervals and excludes off, tiny, invalid and gap periods", () => {
+  const card = kiosk([
+    forecastPoint(0, 13), forecastPoint(5, 5), forecastPoint(10, 0),
+    forecastPoint(15, 100, null), forecastPoint(20, null), forecastPoint(25, 101),
+    forecastPoint(30, 100), forecastPoint(60, 100), forecastPoint(65, 0),
+  ]);
+  const bands = card.shadowRoot.innerHTML.match(/<rect class="chc-heating-band"[^>]+/g);
+  assert.equal(bands.length, 2);
+  assert.doesNotMatch(card.shadowRoot.innerHTML, /NaN/);
+});
+
+test("missing or malformed forecasts show a concise fallback", () => {
+  for (const points of [[], [null, { datetime: "invalid", temperature: 20 }], [forecastPoint(0, 0)]]) {
+    const html = kiosk(points).shadowRoot.innerHTML;
+    assert.match(html, /Forecast unavailable/);
+    assert.doesNotMatch(html, /<svg|NaN/);
+  }
+});
+
+test("kiosk supports Fahrenheit and missing live status without inventing readings", () => {
+  const card = kiosk([forecastPoint(0, 0), forecastPoint(5, 0)], { temperature_unit: "°F" });
+  assert.match(card.shadowRoot.innerHTML, /°F/);
+  card.hass.states["sensor.central_heating_controller_status"] = undefined;
+  card.hass = card.hass;
+  assert.match(card.shadowRoot.innerHTML, /chc-kiosk-now">—/);
+  assert.match(card.shadowRoot.innerHTML, /<svg/);
+});

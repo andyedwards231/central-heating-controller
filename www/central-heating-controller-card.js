@@ -356,7 +356,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._bindActions();
   }
 
-  _renderForecast() {
+  _renderForecast(compact = false) {
     const state = this._state(this._entities.indoorTemperatureForecast);
     const attrs = state?.attributes || {};
     const rows = Array.isArray(attrs.forecast) ? attrs.forecast
@@ -365,6 +365,7 @@ class CentralHeatingControllerCard extends HTMLElement {
         time: new Date(point.datetime).getTime(),
         temperature: this._finiteNumber(point.temperature),
         target: this._finiteNumber(point.target_temperature),
+        demand: this._finiteNumber(point.heating_demand_percent),
       }))
       .filter((point) => Number.isFinite(point.time) && point.temperature !== null)
       .sort((a, b) => a.time - b.time) : [];
@@ -406,6 +407,13 @@ class CentralHeatingControllerCard extends HTMLElement {
         const date = new Date(value);
         return `${date.toLocaleDateString([], { weekday: "short" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
       };
+      const heatingBands = compact ? rows.slice(0, -1).map((point, index) => {
+        const next = rows[index + 1];
+        // Demand describes the interval beginning at this point; do not bridge gaps.
+        if (point.target === null || point.demand === null || point.demand <= 5 || point.demand > 100
+            || next.time <= point.time || next.time - point.time > 10 * 60 * 1000) return "";
+        return `<rect class="chc-heating-band" x="${x(point.time)}" y="${top}" width="${x(next.time) - x(point.time)}" height="${height-top-bottom}"/>`;
+      }).join("") : "";
       const first = formatAxisTime(tMin);
       const last = formatAxisTime(tMax);
       const timeTicks = [];
@@ -418,23 +426,28 @@ class CentralHeatingControllerCard extends HTMLElement {
         const tickLabel = includeDay || day !== previousDay ? `${day} ${label}` : label;
         return `<g><line x1="${x(time)}" y1="${top}" x2="${x(time)}" y2="${height-bottom}" class="chc-chart-grid chc-chart-vgrid"/><text x="${x(time)}" y="${height-17}" text-anchor="middle">${this._escape(tickLabel)}</text></g>`;
       };
+      if (compact) {
+        for (let i = 0; i <= 4; i++) timeTicks.push(axisTick(tMin + (tMax - tMin) * i / 4, i === 0 || i === 4));
+      } else {
       timeTicks.push(axisTick(tMin, true));
       for (let time = Math.ceil(tMin / interval) * interval; time < tMax; time += interval) {
         if (time > tMin) timeTicks.push(axisTick(time));
+      }
       }
       content = `<div class="chc-chart-wrap">
         <svg class="chc-chart" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chc-chart-title chc-chart-desc">
           <title id="chc-chart-title">Indoor temperature forecast for the next 24 hours</title>
           <desc id="chc-chart-desc">Predicted indoor temperature and target temperature, in ${this._escape(unit)}, from ${this._escape(first)} to ${this._escape(last)} local time.</desc>
-          ${ticks}${timeTicks.join("")}
+          ${heatingBands}${ticks}${timeTicks.join("")}
           <path d="${pathFor("temperature")}" class="chc-chart-line chc-chart-indoor"/><path d="${pathFor("target", true)}" class="chc-chart-line chc-chart-target"/>
-        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>Indoor forecast</span><span><i class="chc-legend-target"></i>Target</span></div>
+        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span>${compact ? '<span><i class="chc-legend-heating"></i>Heating expected</span>' : ""}</div>
       </div>`;
     } else if (confidence === "learning") {
       content = `<div class="chc-forecast-state">${this._escape(reason || "Learning your home’s heating response. A forecast will appear when enough data is available.")}</div>`;
     } else {
       content = `<div class="chc-forecast-state">${this._escape(reason || (!state || ["unknown", "unavailable"].includes(state.state) ? "Forecast is unavailable." : "A 24-hour forecast is not available yet."))}</div>`;
     }
+    if (compact) return rows.length > 1 ? content : '<div class="chc-kiosk-empty">Forecast unavailable</div>';
     const learning = confidence === "learning" && rows.length
       ? `<div class="chc-forecast-state is-learning">Uncalibrated estimate — learning your home’s heating response.</div>` : "";
     const endpoint = state && Number.isFinite(Number(state.state))
@@ -786,4 +799,54 @@ window.customCards.push({
   type: CARD_NAME,
   name: "Central Heating Controller Card",
   description: "Control and visualize the Central Heating Controller integration.",
+});
+
+
+class CentralHeatingForecastCard extends CentralHeatingControllerCard {
+  getCardSize() { return 4; }
+
+  getGridOptions() { return { columns: 12, rows: 6, min_columns: 6, min_rows: 5 }; }
+
+  _render() {
+    if (!this.shadowRoot || !this._config) return;
+    const status = this._statusState();
+    const forecast = this._state(this._entities.indoorTemperatureForecast);
+    const attrs = forecast?.attributes || {};
+    const unit = attrs.temperature_unit || "°C";
+    const available = status && !["unknown", "unavailable"].includes(status.state);
+    const current = available ? this._finiteNumber(status.attributes?.current_temperature) : null;
+    const target = available ? this._finiteNumber(status.attributes?.effective_target_temperature) : null;
+    const display = value => value === null ? "—" : this._formatNumber(value, unit);
+    this.shadowRoot.innerHTML = `<style>${this._styles()}
+      .chc-kiosk { padding: 18px 20px 14px; overflow: hidden; }
+      .chc-kiosk-header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; margin-bottom: 12px; }
+      .chc-kiosk-now { font-size: clamp(32px, 4vw, 46px); font-weight: 700; line-height: 1.1; white-space: nowrap; }
+      .chc-kiosk-target { font-size: 20px; white-space: nowrap; }
+      .chc-kiosk-label { font-size: 14px; color: var(--secondary-text-color); margin-right: 8px; }
+      .chc-kiosk .chc-chart { height: clamp(180px, 25vw, 260px); font-size: 12px; }
+      .chc-kiosk .chc-chart-indoor { stroke-width: 4; }
+      .chc-kiosk .chc-chart-target { stroke: var(--secondary-text-color, #667085); stroke-width: 2; }
+      .chc-heating-band { fill: #ed962a; opacity: .19; }
+      .chc-kiosk .chc-chart-legend { font-size: 13px; gap: 10px 18px; }
+      .chc-kiosk .chc-legend-target { border-color: var(--secondary-text-color, #667085); }
+      .chc-kiosk .chc-legend-heating { width: 14px; height: 10px; border: 0; background: #ed962a; opacity: .5; border-radius: 2px; }
+      .chc-kiosk-footer { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--secondary-text-color); margin-top: 10px; }
+      .chc-kiosk-empty { min-height: 180px; display: grid; place-items: center; color: var(--secondary-text-color); }
+      @media(max-width: 400px) { .chc-kiosk { padding: 14px 10px; } .chc-kiosk-target { font-size: 17px; } }
+    </style><ha-card class="chc-kiosk" aria-label="House temperature forecast">
+      <div class="chc-kiosk-header"><div><span class="chc-kiosk-label">Now</span><strong class="chc-kiosk-now">${this._escape(display(current))}</strong></div>
+      <div class="chc-kiosk-target"><span class="chc-kiosk-label">Target</span>${this._escape(display(target))}</div></div>
+      ${this._renderForecast(true)}
+      <div class="chc-kiosk-footer"><span>Next 24 hours</span><span>${attrs.confidence === "learning" ? "Early estimate" : "Estimated heating times"}</span></div>
+    </ha-card>`;
+  }
+}
+
+if (!customElements.get("central-heating-forecast-card")) {
+  customElements.define("central-heating-forecast-card", CentralHeatingForecastCard);
+}
+window.customCards.push({
+  type: "central-heating-forecast-card",
+  name: "House Temperature Forecast",
+  description: "A compact 24-hour temperature chart with expected heating periods.",
 });

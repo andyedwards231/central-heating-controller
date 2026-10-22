@@ -15,7 +15,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js?v=1.2.0
+url: /local/central-heating-controller-card.js?v=1.3.0
 type: module
 ```
 
@@ -82,3 +82,23 @@ entities:
   learned_heating_rate: sensor.my_heating_learned_rate
   preheat_start_time: sensor.my_heating_preheat_start
 ```
+
+## Kiosk Forecast Card
+
+A separate, read-only card with large current and target temperatures, a 24-hour
+forecast line, a dashed target line, and amber shading where heating is expected.
+It uses the same JavaScript resource as the other cards. Copy the updated file
+from the v1.3.0 release into `/config/www/central-heating-controller-card.js`,
+update the resource URL above, and refresh the browser.
+
+```yaml
+type: custom:central-heating-forecast-card
+entity: sensor.central_heating_controller_status
+```
+
+Use a full-width section on the tablet for the clearest chart. The chart height
+is capped at 260px, with no controls or diagnostic lists. “Early estimate” is
+shown while learning. Amber shading means forecast demand above 5%; these are
+estimated heating periods, not guaranteed boiler switching times. Five-minute
+forecast points limit the precision of the shading. Entity overrides work just
+as for the control card.

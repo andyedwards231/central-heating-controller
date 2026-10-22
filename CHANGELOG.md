@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-10-22
+
+- Add a separate compact kiosk forecast card with large current and target
+  temperatures, a 24-hour forecast chart, and shaded expected heating periods.
+- Keep kiosk wording minimal and chart height bounded; existing control and
+  settings cards remain available in the same JavaScript resource.
+- Update the optional card JavaScript separately after installing through HACS.
+
 ## 1.2.0 — 2026-10-21
 
 - Learn from percentage heating demand (including Tado Hall Heating Power) without
