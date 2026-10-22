@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Heating forecast rendering regression</title>
+<style>
+body { margin: 24px auto; max-width: 1000px; padding: 0 20px; font: 16px system-ui;
+  background: #f4f6f8; color: #17212e; --primary-text-color: #17212e;
+  --secondary-text-color: #526170; --card-background-color: white; }
+ha-card { display: block; background: white; border-radius: 12px; }
+button { padding: 12px 18px; font: inherit; } pre { white-space: pre-wrap; }
+#fixture { margin-top: 32px; } .trailing { height: 1000px; }
+</style></head><body>
+<h1>Forecast rendering regression</h1>
+<p>Synthetic states only. No Home Assistant connection or heating services.</p>
+<button id="run">Run rendering checks</button><pre id="result">Ready.</pre>
+<div id="fixture"></div><div class="trailing"></div>
+<script type="module">
+import "../../www/central-heating-controller-card.js";
+import {createHass} from "../js/fixtures.mjs";
+const statusId = "sensor.central_heating_controller_status";
+const forecastId = "sensor.central_heating_controller_indoor_temperature_forecast";
+const results = document.querySelector("#result");
+document.querySelector("#run").onclick = async () => {
+  const checks = [];
+  const assert = (condition, message) => {
+    if (!condition) throw new Error(message);
+    checks.push(message);
+  };
+  try {
+    const points = Array.from({length:289}, (_, index) => ({
+      datetime: new Date(Date.UTC(2026,9,22,8)+index*300000).toISOString(),
+      temperature: 17+index/100, target_temperature:20,
+      heating_demand_percent: index % 4 ? 0 : 60,
+    }));
+    const forecast = {entity_id:forecastId,state:"19.9",attributes:{
+      forecast:points,confidence:"learned",temperature_unit:"°C",
+    }};
+    let hass = createHass({states:{[forecastId]:forecast}, hass:{
+      locale:{language:"en-GB",time_format:"24",time_zone:"server"},
+      config:{time_zone:"Europe/London"},themes:{darkMode:false},
+    }});
+    const card = document.createElement("central-heating-forecast-card");
+    card.setConfig({entity:statusId}); card.hass=hass;
+    document.querySelector("#fixture").replaceChildren(card);
+    const root=card.shadowRoot;
+    const shell=root.querySelector("ha-card"), svg=root.querySelector("svg");
+    const line=root.querySelector(".chc-chart-indoor"), oldPath=line.getAttribute("d");
+    const header=root.querySelector(".chc-kiosk-now");
+    let renders=0, builds=0;
+    const render=card._render.bind(card), build=card._buildForecast.bind(card);
+    card._render=()=>{renders++;return render();};
+    card._buildForecast=(...args)=>{builds++;return build(...args);};
+    window.scrollTo(0,200); const scroll=window.scrollY;
+    for (let index=0;index<80;index++) {
+      hass={...hass,states:{...hass.states,"sensor.unrelated":{state:String(index)}}};
+      card.hass=hass;
+      if (index%10===0) await new Promise(requestAnimationFrame);
+    }
+    assert(renders===0 && builds===0,"80 unrelated updates: zero renders and forecast builds");
+    assert(window.scrollY===scroll,"Unrelated updates retain document scroll position");
+    const update = states => {hass={...hass,states:{...hass.states,...states}};card.hass=hass;};
+    update({[statusId]:{...hass.states[statusId],attributes:{
+      ...hass.states[statusId].attributes,current_temperature:18.4,effective_target_temperature:20.5,
+    }}});
+    assert(renders===1 && builds===0,"Header update renders once without rebuilding forecast");
+    assert(header.textContent.includes("18.4"),"Current temperature changes in the existing header");
+    assert(root.querySelector("ha-card")===shell && root.querySelector("svg")===svg,
+      "Status update retains card and SVG nodes");
+    update({[forecastId]:{...forecast,attributes:{...forecast.attributes,confidence:"learning",
+      forecast:points.map((p,index)=>({...p,temperature:p.temperature+0.4,
+        heating_demand_percent:index%3 ? 40 : 0})),
+    }}});
+    assert(builds===1 && root.querySelector("svg")===svg && root.querySelector(".chc-chart-indoor")===line,
+      "New forecast retains SVG and line nodes");
+    assert(line.getAttribute("d")!==oldPath && root.querySelectorAll(".chc-heating-band").length===192,
+      "New forecast updates geometry and heating bands");
+    assert(root.querySelector(".chc-kiosk-caption").textContent==="Early estimate",
+      "Confidence change updates footer");
+    const desc=root.querySelector("desc").textContent;
+    hass={...hass,config:{time_zone:"America/New_York"}};card.hass=hass;
+    assert(root.querySelector("desc").textContent!==desc && root.querySelector("svg")===svg,
+      "Time-zone change updates axis labels while retaining SVG");
+    update({[forecastId]:undefined});
+    assert(!root.querySelector("svg") && root.querySelector(".chc-kiosk-empty"),
+      "Removed forecast clears chart and displays unavailable state");
+    update({[forecastId]:forecast,[statusId]:undefined});
+    assert(root.querySelector("svg") && root.querySelector(".chc-kiosk-now").textContent==="—",
+      "Forecast recovers; missing status clears the current temperature");
+    update({[statusId]:createHass().states[statusId]});
+    const override="sensor.custom_forecast";
+    hass={...hass,states:{...hass.states,[override]:{...forecast,attributes:{...forecast.attributes,
+      temperature_unit:"°F",forecast:points.map(p=>({...p,temperature:p.temperature*1.8+32,
+        target_temperature:p.target_temperature*1.8+32})),
+    }}}};
+    card.hass=hass;card.setConfig({entity:statusId,entities:{indoor_temperature_forecast:override}});
+    assert(root.querySelector(".chc-kiosk-now").textContent.includes("°F")
+      && root.querySelector("desc").textContent.includes("°F"),
+      "Configured forecast override changes unit and chart data");
+    assert(hass.calls.length===0,"No heating services called");
+    card.setConfig({entity:statusId});
+    results.textContent="PASS\n"+checks.join("\n");
+  } catch(error) {results.textContent="FAIL\n"+checks.join("\n")+"\n"+error.stack;}
+};
+</script></body></html>

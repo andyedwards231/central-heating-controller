@@ -15,7 +15,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js?v=1.3.0
+url: /local/central-heating-controller-card.js?v=1.3.1
 type: module
 ```
 
@@ -88,7 +88,7 @@ entities:
 A separate, read-only card with large current and target temperatures, a 24-hour
 forecast line, a dashed target line, and amber shading where heating is expected.
 It uses the same JavaScript resource as the other cards. Copy the updated file
-from the v1.3.0 release into `/config/www/central-heating-controller-card.js`,
+from the v1.3.1 release into `/config/www/central-heating-controller-card.js`,
 update the resource URL above, and refresh the browser.
 
 ```yaml
@@ -102,3 +102,28 @@ shown while learning. Amber shading means forecast demand above 5%; these are
 estimated heating periods, not guaranteed boiler switching times. Five-minute
 forecast points limit the precision of the shading. Entity overrides work just
 as for the control card.
+
+## Rendering and regression checks
+
+The cards ignore unrelated Home Assistant state updates. Displayed entity
+replacements (including attribute-only changes, disappearance and recovery), entity
+overrides and configuration changes still update the display. Formatting follows
+Home Assistant's language, clock format and local/server time-zone preferences;
+equivalent preference objects do not cause redraws. The latest Home Assistant
+object is retained even when rendering is skipped, so actions use current callbacks.
+
+The kiosk card reuses its current/target header and chart DOM. Header-only updates
+reuse the cached forecast; new forecast data patches SVG attributes, labels and
+heating bands. Date formatters are reused until their inputs change. These checks
+assume Home Assistant's immutable State objects, rather than objects mutated in place.
+
+Run `node --test tests/js/*.test.mjs` for automated dependency and formatter checks.
+For real-DOM verification, serve the repository on localhost, open
+`tests/browser/forecast-rendering.html`, and select **Run rendering checks**. It uses
+synthetic data only and verifies 80 unrelated updates produce zero renders,
+header-only updates do not rebuild the chart, new forecast geometry retains SVG and
+line nodes, and source/configuration/unavailable/time-zone changes still work.
+
+The Android profiling experiment identified unnecessary rendering. The checks here
+do not establish the cause of earlier low-memory kills or replace a repeat profile
+on the tablet after installing the new JavaScript.

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.1 — 2026-10-22
+
+- Skip dashboard renders when displayed entities and formatting preferences have
+  not changed. The kiosk card tracks its configured status and forecast sources.
+- Reuse date formatters and cached forecast markup. Keep the kiosk card, SVG and
+  chart paths mounted while updating temperatures, labels and forecast geometry.
+- Add update-dependency, formatter-cache and real-browser DOM regression checks.
+
+Replace the optional JavaScript separately and change its resource URL to
+`/local/central-heating-controller-card.js?v=1.3.1`, then fully refresh the browser.
+HACS does not copy the card into `/config/www`. This patch changes no heating policy
+or learned data. The fix removes avoidable rendering; it does not establish the
+cause of Android low-memory kills or a measured long-term tablet improvement.
+
 ## 1.3.0 — 2026-10-22
 
 - Add a separate compact kiosk forecast card with large current and target

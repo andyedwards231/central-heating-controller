@@ -52,7 +52,7 @@ class CentralHeatingControllerCard extends HTMLElement {
       ...config,
     };
     this._entities = this._deriveEntities(this._config.entity, this._config.entities || {});
-    this._render();
+    this._requestRender(true);
   }
 
   set hass(hass) {
@@ -60,11 +60,64 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (this._config) {
       this._entities = this._deriveEntities(this._config.entity, this._config.entities || {});
     }
-    this._render();
+    this._requestRender();
   }
 
   get hass() {
     return this._hass;
+  }
+
+  _renderContext() {
+    return [
+      Boolean(this._hass),
+      this._hass?.language,
+      JSON.stringify(this._hass?.locale),
+      this._hass?.config?.time_zone,
+      JSON.stringify(this._hass?.selectedTheme),
+      this._hass?.themes?.darkMode,
+    ];
+  }
+
+  _renderEntityIds() {
+    return Object.values(this._entities);
+  }
+
+  _renderFormatterInputs() {
+    return [this._hass?.formatEntityState, this._hass?.entities];
+  }
+
+  _requestRender(force = false) {
+    if (!this._config) return;
+    // HA replaces changed State objects. Keep a snapshot rather than the old
+    // hass object: callers can reuse that object with a new states mapping.
+    const inputs = [
+      ...this._renderContext(),
+      ...this._renderFormatterInputs(),
+      ...this._renderEntityIds().flatMap(id => [id, this._state(id)]),
+    ];
+    if (!force && this._renderInputs?.length === inputs.length
+        && inputs.every((value, index) => value === this._renderInputs[index])) return;
+    this._render();
+    this._renderInputs = inputs;
+  }
+
+  _dateFormatters() {
+    const locale = this._hass?.locale;
+    const language = locale?.language || this._hass?.language || undefined;
+    const timeFormat = locale?.time_format;
+    const timeZone = locale?.time_zone === "server" ? this._hass?.config?.time_zone : undefined;
+    const key = JSON.stringify([language, timeFormat, timeZone]);
+    if (this._cachedDateFormatters?.key !== key) {
+      const options = { hour: "2-digit", minute: "2-digit", timeZone };
+      if (timeFormat === "12") options.hourCycle = "h12";
+      if (timeFormat === "24") options.hourCycle = "h23";
+      this._cachedDateFormatters = {
+        key,
+        time: new Intl.DateTimeFormat(timeFormat === "system" ? undefined : language, options),
+        day: new Intl.DateTimeFormat(language, { weekday: "short", timeZone }),
+      };
+    }
+    return this._cachedDateFormatters;
   }
 
   getCardSize() {
@@ -358,6 +411,16 @@ class CentralHeatingControllerCard extends HTMLElement {
 
   _renderForecast(compact = false) {
     const state = this._state(this._entities.indoorTemperatureForecast);
+    const key = this._dateFormatters().key;
+    if (this._forecastCache?.state === state && this._forecastCache.compact === compact
+        && this._forecastCache.formatKey === key) return this._forecastCache.markup;
+    const markup = this._buildForecast(compact);
+    this._forecastCache = { state, compact, formatKey: key, markup };
+    return markup;
+  }
+
+  _buildForecast(compact = false) {
+    const state = this._state(this._entities.indoorTemperatureForecast);
     const attrs = state?.attributes || {};
     const rows = Array.isArray(attrs.forecast) ? attrs.forecast
       .filter((point) => point && typeof point === "object")
@@ -405,7 +468,8 @@ class CentralHeatingControllerCard extends HTMLElement {
       }).join("");
       const formatAxisTime = (value) => {
         const date = new Date(value);
-        return `${date.toLocaleDateString([], { weekday: "short" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+        const formats = this._dateFormatters();
+        return `${formats.day.format(date)} ${formats.time.format(date)}`;
       };
       const heatingBands = compact ? rows.slice(0, -1).map((point, index) => {
         const next = rows[index + 1];
@@ -420,9 +484,10 @@ class CentralHeatingControllerCard extends HTMLElement {
       const interval = 6 * 60 * 60 * 1000;
       const axisTick = (time, includeDay = false) => {
         const date = new Date(time);
-        const label = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const day = date.toLocaleDateString([], { weekday: "short" });
-        const previousDay = new Date(time - interval).toLocaleDateString([], { weekday: "short" });
+        const formats = this._dateFormatters();
+        const label = formats.time.format(date);
+        const day = formats.day.format(date);
+        const previousDay = formats.day.format(new Date(time - interval));
         const tickLabel = includeDay || day !== previousDay ? `${day} ${label}` : label;
         return `<g><line x1="${x(time)}" y1="${top}" x2="${x(time)}" y2="${height-bottom}" class="chc-chart-grid chc-chart-vgrid"/><text x="${x(time)}" y="${height-17}" text-anchor="middle">${this._escape(tickLabel)}</text></g>`;
       };
@@ -438,7 +503,7 @@ class CentralHeatingControllerCard extends HTMLElement {
         <svg class="chc-chart" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="chc-chart-title chc-chart-desc">
           <title id="chc-chart-title">Indoor temperature forecast for the next 24 hours</title>
           <desc id="chc-chart-desc">Predicted indoor temperature and target temperature, in ${this._escape(unit)}, from ${this._escape(first)} to ${this._escape(last)} local time.</desc>
-          ${heatingBands}${ticks}${timeTicks.join("")}
+          <g class="chc-chart-bands">${heatingBands}</g><g class="chc-chart-temperature-ticks">${ticks}</g><g class="chc-chart-time-ticks">${timeTicks.join("")}</g>
           <path d="${pathFor("temperature")}" class="chc-chart-line chc-chart-indoor"/><path d="${pathFor("target", true)}" class="chc-chart-line chc-chart-target"/>
         </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span>${compact ? '<span><i class="chc-legend-heating"></i>Heating expected</span>' : ""}</div>
       </div>`;
@@ -537,7 +602,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (Number.isNaN(date.getTime())) {
       return String(value);
     }
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return this._dateFormatters().time.format(date);
   }
 
   _bindActions() {
@@ -807,6 +872,44 @@ class CentralHeatingForecastCard extends CentralHeatingControllerCard {
 
   getGridOptions() { return { columns: 12, rows: 6, min_columns: 6, min_rows: 5 }; }
 
+  _renderEntityIds() {
+    return [this._entities.status, this._entities.indoorTemperatureForecast];
+  }
+
+  _renderFormatterInputs() {
+    return []; // This card formats its own two temperatures, not entity states.
+  }
+
+  _syncChartChildren(current, incoming) {
+    // Keep the SVG and its layers/paths mounted. Only changed attributes, text
+    // and added/removed children are patched when new forecast data arrives.
+    for (let index = 0; index < incoming.childNodes.length; index++) {
+      const next = incoming.childNodes[index];
+      const prior = current.childNodes[index];
+      if (!prior) {
+        current.appendChild(next.cloneNode(true));
+      } else if (prior.nodeType !== next.nodeType || prior.nodeName !== next.nodeName
+                 || prior.namespaceURI !== next.namespaceURI) {
+        current.replaceChild(next.cloneNode(true), prior);
+      } else if (next.nodeType === 3 || next.nodeType === 8) {
+        if (prior.nodeValue !== next.nodeValue) prior.nodeValue = next.nodeValue;
+      } else {
+        for (const attribute of [...prior.attributes]) {
+          if (!next.hasAttribute(attribute.name)) prior.removeAttribute(attribute.name);
+        }
+        for (const attribute of next.attributes) {
+          if (prior.getAttribute(attribute.name) !== attribute.value) {
+            prior.setAttribute(attribute.name, attribute.value);
+          }
+        }
+        this._syncChartChildren(prior, next);
+      }
+    }
+    while (current.childNodes.length > incoming.childNodes.length) {
+      current.removeChild(current.lastChild);
+    }
+  }
+
   _render() {
     if (!this.shadowRoot || !this._config) return;
     const status = this._statusState();
@@ -817,6 +920,27 @@ class CentralHeatingForecastCard extends CentralHeatingControllerCard {
     const current = available ? this._finiteNumber(status.attributes?.current_temperature) : null;
     const target = available ? this._finiteNumber(status.attributes?.effective_target_temperature) : null;
     const display = value => value === null ? "—" : this._formatNumber(value, unit);
+    const chart = this._renderForecast(true);
+    const caption = attrs.confidence === "learning" ? "Early estimate" : "Estimated heating times";
+    if (this.shadowRoot.querySelector(".chc-kiosk")) {
+      for (const [selector, value] of [
+        [".chc-kiosk-now", display(current)],
+        [".chc-kiosk-target-value", display(target)],
+        [".chc-kiosk-caption", caption],
+      ]) {
+        const element = this.shadowRoot.querySelector(selector);
+        if (element.textContent !== value) element.textContent = value;
+      }
+      if (chart !== this._kioskForecastMarkup) {
+        const template = document.createElement("template");
+        template.innerHTML = chart;
+        this._syncChartChildren(
+          this.shadowRoot.querySelector(".chc-kiosk-forecast"), template.content,
+        );
+        this._kioskForecastMarkup = chart;
+      }
+      return;
+    }
     this.shadowRoot.innerHTML = `<style>${this._styles()}
       .chc-kiosk { padding: 18px 20px 14px; overflow: hidden; }
       .chc-kiosk-header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; margin-bottom: 12px; }
@@ -835,10 +959,11 @@ class CentralHeatingForecastCard extends CentralHeatingControllerCard {
       @media(max-width: 400px) { .chc-kiosk { padding: 14px 10px; } .chc-kiosk-target { font-size: 17px; } }
     </style><ha-card class="chc-kiosk" aria-label="House temperature forecast">
       <div class="chc-kiosk-header"><div><span class="chc-kiosk-label">Now</span><strong class="chc-kiosk-now">${this._escape(display(current))}</strong></div>
-      <div class="chc-kiosk-target"><span class="chc-kiosk-label">Target</span>${this._escape(display(target))}</div></div>
-      ${this._renderForecast(true)}
-      <div class="chc-kiosk-footer"><span>Next 24 hours</span><span>${attrs.confidence === "learning" ? "Early estimate" : "Estimated heating times"}</span></div>
+      <div class="chc-kiosk-target"><span class="chc-kiosk-label">Target</span><span class="chc-kiosk-target-value">${this._escape(display(target))}</span></div></div>
+      <div class="chc-kiosk-forecast">${chart}</div>
+      <div class="chc-kiosk-footer"><span>Next 24 hours</span><span class="chc-kiosk-caption">${caption}</span></div>
     </ha-card>`;
+    this._kioskForecastMarkup = chart;
   }
 }
 
