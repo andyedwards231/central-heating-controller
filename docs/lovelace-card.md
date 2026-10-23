@@ -2,6 +2,8 @@
 
 The repository includes a dependency-free Lovelace custom card at
 `www/central-heating-controller-card.js`.
+For the ready-made Overview, Schedule and Learning dashboard, see
+[Heating dashboard setup](heating-dashboard.md).
 
 HACS installs the integration directory only; this optional card must be copied
 separately, including after a card update.
@@ -111,7 +113,7 @@ entities:
 A separate, read-only card with large current and target temperatures, a 24-hour
 forecast line, a dashed target line, and amber shading where heating is expected.
 It uses the same JavaScript resource as the other cards. Copy the updated file
-from the v1.5.0 release into `/config/www/central-heating-controller-card.js`,
+from the v1.6.0 release into `/config/www/central-heating-controller-card.js`,
 update the resource URL above, and refresh the browser.
 
 ```yaml

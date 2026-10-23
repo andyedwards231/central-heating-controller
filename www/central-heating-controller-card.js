@@ -15,6 +15,8 @@ const ENTITY_SUFFIXES = {
   preheatStart: ["sensor", "preheat_start_time", "preheat_start_time"],
   indoorTemperatureForecast: ["sensor", "indoor_temperature_forecast", "indoor_temperature_forecast"],
   smartHeatingPlan: ["sensor", "smart_heating_plan", "smart_heating_plan"],
+  heatingCostToday: ["sensor", "predicted_heating_cost_today", "predicted_heating_cost_today"],
+  heatingCostTomorrow: ["sensor", "predicted_heating_cost_tomorrow", "predicted_heating_cost_tomorrow"],
 };
 
 // Existing entity registries retain names created by releases before 1.1.0.
@@ -45,7 +47,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._scheduleDraft = null;
     this._scheduleDraftDirty = false;
     this._scheduleSettingsSource = null;
-    this._scheduleEditorOpen = false;
+    this._scheduleEditorOpen = null;
     this._scheduleMessage = "";
   }
 
@@ -87,6 +89,10 @@ class CentralHeatingControllerCard extends HTMLElement {
   }
 
   _renderEntityIds() {
+    const mode = this._config?.mode;
+    if (mode === "overview") return ["status", "effectiveTarget", "controllerMode", "heatBlast", "preheatStart", "indoorTemperatureForecast", "heatingCostToday", "heatingCostTomorrow"].map(key => this._entities[key]);
+    if (mode === "schedule") return ["status", "smartHeatingPlan", "highTemperature"].map(key => this._entities[key]);
+    if (mode === "learning") return ["status", "indoorTemperatureForecast", "learnedRate", "heatingCostToday"].map(key => this._entities[key]);
     return Object.values(this._entities);
   }
 
@@ -223,6 +229,7 @@ class CentralHeatingControllerCard extends HTMLElement {
   }
 
   _renderScheduleEditor(settings = EMPTY_SETTINGS) {
+    if (this._scheduleEditorOpen === null) this._scheduleEditorOpen = this._config?.mode === "schedule";
     settings ||= EMPTY_SETTINGS;
     if (!this._scheduleDraft || (!this._scheduleDraftDirty && settings !== this._scheduleSettingsSource)) {
       this._scheduleDraft = this._initialScheduleDraft(settings);
@@ -382,7 +389,94 @@ class CentralHeatingControllerCard extends HTMLElement {
       return;
     }
 
+    if (["overview", "schedule", "learning"].includes(this._config.mode)) {
+      this._renderDashboardMode(this._config.mode);
+      return;
+    }
+
     this._renderControl();
+  }
+
+  _renderDashboardMode(mode) {
+    const active = this.shadowRoot.activeElement;
+    const activePath = active?.dataset?.draftPath;
+    const selection = activePath && typeof active.selectionStart === "number"
+      ? [active.selectionStart, active.selectionEnd] : null;
+    const status = this._statusState();
+    const attrs = status?.attributes || {};
+    const plan = this._state(this._entities.smartHeatingPlan);
+    const previewReady = plan?.state === "preview" && plan.attributes?.preview === true;
+    const header = `<div class="chc-header"><div><div class="chc-title">${this._escape(this._config.title)}</div><div class="chc-subtitle">${mode === "overview" ? "Heating at a glance" : mode === "schedule" ? "Plan and preview" : "How well the controller is learning"}</div></div><div class="chc-badge">${this._escape(this._statusLabel(status?.state))}</div></div>`;
+    let body = "";
+    if (mode === "overview") {
+      const target = this._formatEntity(this._entities.effectiveTarget, this._formatNumber(attrs.effective_target_temperature));
+      const current = this._formatTemperature(attrs.current_temperature);
+      const arrival = this._formatTime(attrs.arrival_time);
+      const preheat = this._formatTime(this._state(this._entities.preheatStart)?.state || attrs.preheat_start_time);
+      const modeEntity = this._state(this._entities.controllerMode);
+      const modeState = modeEntity?.state;
+      const modeUnavailable = !modeEntity || ["unknown", "unavailable"].includes(modeState);
+      body = `<div class="chc-dashboard-controls"><div class="chc-overview-primary"><div><div class="chc-label">Current temperature</div><div class="chc-current-big">${this._escape(current)}</div></div><div><div class="chc-label">Current target</div><div class="chc-target">${this._escape(target)}</div></div></div>
+        <label class="chc-mode"><span class="chc-label">Heating mode</span><select data-mode aria-label="Heating mode" ${modeUnavailable ? "disabled" : ""}>${modeUnavailable ? "<option selected>Unavailable</option>" : ["auto", "away", "off"].map(value => `<option value="${value}" ${modeState === value ? "selected" : ""}>${this._titleCase(value)}</option>`).join("")}</select></label>
+        <div class="chc-actions"><button type="button" data-action="blast" class="chc-hot" ${this._state(this._entities.heatBlast) && modeState === "auto" ? "" : "disabled"}>Heat Blast</button></div></div>
+        ${this._renderDashboardForecast()}
+        <div class="chc-cost-grid">${this._renderCost("Estimated heating cost today", this._entities.heatingCostToday)}${this._renderCost("Estimated heating cost tomorrow", this._entities.heatingCostTomorrow)}</div>
+        <div class="chc-visual-grid">${arrival !== "Unavailable" ? this._renderMetric("Next arrival", arrival) : ""}${preheat !== "Unavailable" ? this._renderMetric("Pre-heat starts", preheat) : ""}</div>
+        <p class="chc-forecast-note chc-dashboard-hint">The schedule preview is for planning only. Use the Schedule dashboard view to review it.</p>`;
+    } else if (mode === "schedule") {
+      const settingsAvailable = Boolean(plan && plan.attributes?.settings && typeof plan.attributes.settings === "object"
+        && Object.keys(plan.attributes.settings).length);
+      const previewState = plan?.state === "unavailable" || plan?.state === "unknown"
+        ? "The preview is unavailable. Check the integration and its configured forecast inputs."
+        : !plan ? "Update the integration to v1.5.0 or later and restart Home Assistant to enable schedule previews."
+          : !previewReady ? "Schedule preview is disabled in the integration options." : "";
+      body = `<section class="chc-preview" aria-label="Schedule preview"><div class="chc-preview-heading"><strong>Preview only</strong><span>Does not control heating</span></div>${previewReady ? `${plan.attributes?.explanation ? `<div class="chc-forecast-note">${this._escape(plan.attributes.explanation)}</div>` : ""}${this._renderForecast(false, this._entities.smartHeatingPlan)}` : `<div class="chc-forecast-note">${this._escape(plan?.attributes?.explanation || previewState)}</div>`}</section>
+        <div class="chc-setpoints">${this._renderNumberControl("Comfort temperature", this._entities.highTemperature)}</div><p class="chc-forecast-note chc-dashboard-hint">Comfort temperature also changes the High setting used by your current heating schedule. The times and allowance below affect the preview only.</p>${settingsAvailable ? this._renderScheduleEditor(plan.attributes.settings) : `<p class="chc-forecast-note chc-dashboard-hint">Schedule editing is unavailable. Check the integration options.</p>`}`;
+    } else {
+      const forecast = this._state(this._entities.indoorTemperatureForecast)?.attributes || {};
+      const unit = forecast.temperature_unit || "°C";
+      const accuracy = ["1h", "6h", "24h"].map(h => {
+        const item = forecast.forecast_accuracy?.[h] || {};
+        const error = this._finiteNumber(item.mae_c), count = this._finiteNumber(item.count);
+        return this._renderMetric(`${h} forecast accuracy`, error !== null && error >= 0 ? `${this._formatNumber(unit === "°F" ? error * 1.8 : error, unit)} mean absolute error · ${count ?? 0} readings` : "No readings yet");
+      }).join("");
+      const samples = this._finiteNumber(forecast.learned_samples ?? attrs.learned_samples);
+      const response = forecast.heating_response_learned === true && this._finiteNumber(forecast.heating_response_minutes) !== null
+        ? this._formatNumber(forecast.heating_response_minutes, "min") : "Still learning";
+      const rate = this._formatEntity(this._entities.learnedRate);
+      const cost = this._state(this._entities.heatingCostToday)?.attributes?.calibration;
+      const delayConfidence = forecast.heating_response_learned === true
+        ? "Delay estimate is in use" : "Delay estimate is still being learnt";
+      const demandConfidence = forecast.demand_model_learned === true
+        ? "Heating demand estimate is established" : "Heating demand estimate is still being learnt";
+      body = `<div class="chc-learning-grid">${accuracy}${this._renderMetric("Heating samples", samples === null ? "No samples yet" : String(samples))}${this._renderMetric("Heating response delay", `${response} · ${delayConfidence}`)}${this._renderMetric("Heating demand", demandConfidence)}${this._renderMetric("Learned heating rate", rate)}${this._renderMetric("Demand readings collected", cost?.observation_count != null ? String(cost.observation_count) : "No readings yet")}${this._renderMetric("Gas intervals matched", cost?.sample_count ? `${cost.sample_count} intervals` : "No matched intervals yet")}</div><p class="chc-forecast-note chc-dashboard-hint">Mean absolute error is the average distance between a forecast and the measured temperature. Lower is better. These checks describe the live heating schedule, not the proposed plan.</p>`;
+    }
+    this.shadowRoot.innerHTML = `<style>${this._styles()}</style><ha-card class="chc-card chc-dashboard chc-dashboard-${mode}">${header}${body}</ha-card>`;
+    this._bindActions();
+    if (activePath) {
+      const replacement = [...this.shadowRoot.querySelectorAll("[data-draft-path]")].find(input => input.dataset.draftPath === activePath);
+      replacement?.focus();
+      if (selection) replacement?.setSelectionRange?.(...selection);
+    }
+  }
+
+  _renderDashboardForecast() {
+    const forecast = this._state(this._entities.indoorTemperatureForecast);
+    const early = forecast?.attributes?.confidence !== "learned";
+    return `<section class="chc-forecast" aria-label="Live heating forecast"><div class="chc-section-title">Next 24 hours</div>${early ? '<p class="chc-forecast-state is-learning">Early estimate — still learning your home.</p>' : ""}${this._renderForecast(true)}<p class="chc-forecast-note">Shaded areas show when heating is expected. The dashed line is the target temperature.</p></section>`;
+  }
+
+  _renderCost(label, entityId) {
+    const state = this._state(entityId);
+    const number = this._finiteNumber(state?.state);
+    const value = number !== null && number >= 0 ? this._formatEntity(entityId) : "Unavailable";
+    return `<div class="chc-cost"><div class="chc-label">${this._escape(label)}</div><div class="chc-cost-value">${this._escape(value)}</div></div>`;
+  }
+
+  _formatTemperature(value) {
+    if (value === undefined || value === null || value === "") return "Unavailable";
+    const unit = this._state(this._entities.indoorTemperatureForecast)?.attributes?.temperature_unit || this._state(this._entities.effectiveTarget)?.attributes?.unit_of_measurement || this._hass?.config?.unit_system?.temperature || "°C";
+    return this._formatNumber(value, unit === "degC" ? "°C" : unit === "degF" ? "°F" : unit);
   }
 
   _renderStatusEntityError() {
@@ -839,6 +933,34 @@ class CentralHeatingControllerCard extends HTMLElement {
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 14px;
         padding: 18px;
+      }
+      .chc-overview-primary { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px 18px 16px; align-items: end; }
+      .chc-current-big { margin-top: 4px; font-size: 34px; font-weight: 750; line-height: 1; }
+      .chc-overview-primary .chc-target { font-size: 42px; }
+      .chc-cost-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 18px 16px; }
+      .chc-cost { border: 1px solid var(--divider-color, rgba(127,127,127,.22)); border-radius: 8px; padding: 11px; }
+      .chc-cost-value { margin-top: 5px; font-size: 21px; font-weight: 750; }
+      .chc-dashboard-hint { padding: 0 18px 18px; }
+      .chc-learning-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; padding: 18px; }
+      .chc-dashboard { max-width: 1200px; margin-inline: auto; }
+      .chc-dashboard .chc-chart { max-height: 340px; }
+      .chc-dashboard-overview .chc-forecast { padding-top: 4px; }
+      .chc-dashboard-schedule .chc-setpoints { grid-template-columns: minmax(0, 1fr); max-width: 540px; }
+      .chc-dashboard-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(170px, .45fr); align-items: center; }
+      .chc-dashboard-controls .chc-overview-primary { grid-row: 1 / 3; }
+      .chc-dashboard-controls .chc-actions { padding-top: 0; }
+      .chc-dashboard-learning .chc-metric-value { font-size: 18px; line-height: 1.5; overflow-wrap: anywhere; }
+      @media (min-width: 850px) {
+        .chc-dashboard-learning .chc-learning-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+        .chc-dashboard-schedule .chc-schedule-editor form { grid-template-columns: repeat(2,minmax(0,1fr)); }
+        .chc-dashboard-schedule .chc-enable, .chc-dashboard-schedule .chc-schedule-hint,
+        .chc-dashboard-schedule .chc-schedule-footer { grid-column: 1 / -1; }
+      }
+      @media (max-width: 550px) {
+        .chc-dashboard-controls { grid-template-columns: minmax(0,1fr); }
+        .chc-dashboard-controls .chc-overview-primary { grid-row: auto; }
+        .chc-dashboard .chc-target, .chc-dashboard .chc-current-big { font-size: 30px; }
+        .chc-dashboard-learning .chc-learning-grid { grid-template-columns: minmax(0,1fr); }
       }
       .chc-mode { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 0 18px 14px; }
       .chc-mode select { width: 100%; min-height: 40px; padding: 7px 10px; border: 1px solid var(--divider-color, #aaa); border-radius: 8px; color: inherit; background: var(--card-background-color, #fff); font: inherit; }

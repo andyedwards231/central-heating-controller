@@ -195,7 +195,8 @@ model is trusted.
 This repository also includes a drop-in custom Lovelace card at
 `www/central-heating-controller-card.js`. It supports daily control, visual status,
 and settings modes from the same status sensor configuration. See
-`docs/lovelace-card.md` for installation and YAML examples.
+[card installation and examples](docs/lovelace-card.md) and the optional
+[three-view Heating dashboard](docs/heating-dashboard.md).
 
 ## Troubleshooting
 

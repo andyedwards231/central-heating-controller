@@ -1,0 +1,29 @@
+title: Heating
+views:
+  - title: Overview
+    path: overview
+    icon: mdi:radiator
+    type: panel
+    cards:
+      - type: custom:central-heating-controller-card
+        entity: sensor.central_heating_controller_status
+        title: Heating
+        mode: overview
+  - title: Schedule
+    path: schedule
+    icon: mdi:calendar-clock
+    type: panel
+    cards:
+      - type: custom:central-heating-controller-card
+        entity: sensor.central_heating_controller_status
+        title: Comfort schedule
+        mode: schedule
+  - title: Learning
+    path: learning
+    icon: mdi:chart-line
+    type: panel
+    cards:
+      - type: custom:central-heating-controller-card
+        entity: sensor.central_heating_controller_status
+        title: Learning and accuracy
+        mode: learning

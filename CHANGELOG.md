@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.0 — 2026-10-23
+
+## Dedicated Heating dashboard
+
+Adds a ready-to-use dashboard with three views:
+
+- **Overview:** current and target temperature, live Auto/Away/Off controls, the next 24 hours with expected heating shaded, estimated heating costs and known arrival timing.
+- **Schedule:** the proposed temperature forecast, editable comfort periods, configurable night settings and maximum daytime drop. Clearly marked **Preview only**. Changing the comfort temperature also changes the existing live High setting; schedule edits affect the preview only.
+- **Learning:** measured forecast errors at 1, 6 and 24 hours, sample counts, heating response and matched gas readings. Missing data is shown explicitly.
+
+The kiosk card remains supported and its rendering path is unchanged. The dashboard adapts to phone and desktop layouts, retains schedule drafts through sensor updates and ignores unrelated entity updates.
+
+## Install
+
+Update the integration through HACS and restart Home Assistant if upgrading from before v1.5.0. This release does not change the heating policy or enable intelligent schedule control.
+
+Replace `/config/www/central-heating-controller-card.js` with the attached JavaScript. Update the existing resource URL to `/local/central-heating-controller-card.js?v=1.6.0` (JavaScript module), then refresh.
+
+Create an empty **Heating** dashboard and paste the attached `heating.yaml` into its Raw configuration editor. The three views share the existing resource. Your kiosk dashboard can stay as it is.
+
+See [dashboard setup](https://github.com/andyedwards231/central-heating-controller/blob/main/docs/heating-dashboard.md) for UI installation and optional YAML dashboard registration.
+
+Validated with 462 Python tests, 53 JavaScript tests and browser checks at desktop and phone widths.
+
+
 ## 1.5.0 — 2026-10-23
 
 ## Smart heating schedule preview
