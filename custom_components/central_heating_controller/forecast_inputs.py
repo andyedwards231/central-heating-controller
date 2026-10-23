@@ -99,6 +99,7 @@ class ForecastInputs:
         self._cache: dict[tuple[str, str], tuple[float, object]] = {}
         self._failed_at: dict[tuple[str, str], float] = {}
         self._failure: dict[tuple[str, str], str] = {}
+        self.revision = 0
 
     def invalidate_schedule(self, entity_id: str) -> None:
         """Refresh edited schedules immediately instead of waiting for the cache."""
@@ -106,6 +107,7 @@ class ForecastInputs:
         self._cache.pop(key, None)
         self._failed_at.pop(key, None)
         self._failure.pop(key, None)
+        self.revision += 1
 
     async def _service(
         self, domain: str, service: str, entity_id: str, data: dict[str, object]
@@ -138,6 +140,7 @@ class ForecastInputs:
                 return cached[1]
             raise ValueError(self._failure[key]) from err
         self._cache[key] = (now, response)
+        self.revision += 1
         self._failed_at.pop(key, None)
         self._failure.pop(key, None)
         return response

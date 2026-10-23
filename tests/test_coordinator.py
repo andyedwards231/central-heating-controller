@@ -154,6 +154,7 @@ async def test_storage_round_trip_serializes_only_persistent_fields(hass) -> Non
     assert save.await_args.args[0] == {
         "forced_away": False, "away_seen_absent": [], "away_selected_at": None,
         "auto_mode": False,
+        "smart_control_enabled": False,
         "blast_until": "2026-06-28T17:00:00+00:00",
         "manual_override_target": 18.5,
         "manual_override_fingerprint": [True, None, "home", 17.0],
@@ -601,7 +602,9 @@ async def test_service_failure_clears_pending_and_retries(hass, freezer) -> None
     await coordinator.async_refresh()
     await coordinator.async_refresh()
 
-    assert hass.services.async_call.await_count == 4
+    # A rejected mode must not be followed by a setpoint write in the old mode.
+    assert hass.services.async_call.await_count == 2
+    assert all(call.args[1] == "set_hvac_mode" for call in hass.services.async_call.await_args_list)
     failed_context_ids = {
         call.kwargs["context"].id for call in hass.services.async_call.await_args_list
     }

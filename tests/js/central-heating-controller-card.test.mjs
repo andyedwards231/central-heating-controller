@@ -158,7 +158,7 @@ test("schedule editor loads multiple periods, preserves drafts, and saves the fu
 
   assert.equal(card._scheduleDraft.weekly_schedule.monday.length, 3);
   assert.match(card.shadowRoot.innerHTML, /Schedule and night settings/);
-  assert.match(card.shadowRoot.innerHTML, /Show schedule preview/);
+  assert.match(card.shadowRoot.innerHTML, /Enable schedule planning/);
   assert.match(card.shadowRoot.innerHTML, /warm by these times/);
   card._setScheduleEditorOpen(true);
   card._updateScheduleDraft("weekly_schedule.monday.1.start", "12:30");

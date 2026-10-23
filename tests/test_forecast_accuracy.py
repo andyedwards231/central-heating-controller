@@ -168,3 +168,41 @@ def test_bias_and_rmse_preserve_direction_across_multiple_errors() -> None:
     assert tracker.metrics()["1h"] == {
         "mae_c": 1.0, "bias_c": 0.0, "rmse_c": 1.0, "count": 2,
     }
+
+
+def test_readiness_metrics_use_only_last_seven_days_and_do_not_mutate_scores() -> None:
+    tracker = ForecastAccuracyTracker()
+    for horizon in ("1h", "6h", "24h"):
+        tracker._scores[horizon].extend([
+            (NOW - timedelta(days=8), 90.0),
+            (NOW - timedelta(days=2), 1.0),
+            (NOW - timedelta(hours=1), -2.0),
+            (NOW + timedelta(minutes=1), 50.0),
+        ])
+
+    before = tracker.to_dict()
+    metrics = tracker.readiness_metrics(NOW)
+
+    assert metrics["1h"] == {
+        "mae_c": 1.5,
+        "bias_c": -0.5,
+        "rmse_c": pytest.approx((2.5) ** 0.5),
+        "count": 2,
+        "distinct_dates": 2,
+        "span_hours": pytest.approx(47.0),
+        "latest_at": (NOW - timedelta(hours=1)).isoformat(),
+    }
+    assert tracker.to_dict() == before
+    assert tracker.metrics()["1h"]["count"] == 4
+
+
+def test_readiness_metrics_with_invalid_now_fail_closed_to_empty_windows() -> None:
+    tracker = ForecastAccuracyTracker()
+    tracker._scores["1h"].append((NOW, 1.0))
+
+    metrics = tracker.readiness_metrics(datetime(2026, 1, 1))
+
+    assert metrics["1h"] == {
+        "mae_c": None, "bias_c": None, "rmse_c": None, "count": 0,
+        "distinct_dates": 0, "span_hours": 0.0, "latest_at": None,
+    }

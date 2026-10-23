@@ -77,6 +77,7 @@ class PersistentState:
     """
 
     auto_mode: bool = True
+    smart_control_enabled: bool = False
     forced_away: bool = False
     away_seen_absent: list[str] = field(default_factory=list)
     away_selected_at: datetime | None = None
@@ -120,6 +121,7 @@ class ControllerState:
     temperature_forecast: dict = field(default_factory=dict)
     heating_cost: dict = field(default_factory=dict)
     smart_plan: dict = field(default_factory=dict)
+    smart_readiness: dict = field(default_factory=dict)
 
     @property
     def status(self) -> ControllerStatus:

@@ -123,6 +123,35 @@ class ForecastAccuracyTracker:
             }
         return result
 
+    def readiness_metrics(self, now: datetime) -> dict[str, dict[str, float | int | str | None]]:
+        """Return recent, non-future evidence used by the readiness gate.
+
+        Only observations from the seven days ending at ``now`` are included.
+        This method does not change the stored score cohorts, so callers can
+        inspect a rolling window without affecting the existing lifetime-ish
+        ``metrics()`` view or persisted data.
+        """
+        current = _utc(now)
+        result: dict[str, dict[str, float | int | str | None]] = {}
+        for horizon, samples in self._scores.items():
+            recent = [
+                (at, error)
+                for at, error in samples
+                if current is not None and current - timedelta(days=7) <= at <= current
+            ]
+            errors = [error for _, error in recent]
+            times = [at for at, _ in recent]
+            result[horizon] = {
+                "mae_c": sum(abs(error) for error in errors) / len(errors) if errors else None,
+                "bias_c": sum(errors) / len(errors) if errors else None,
+                "rmse_c": sqrt(sum(error * error for error in errors) / len(errors)) if errors else None,
+                "count": len(errors),
+                "distinct_dates": len({at.date() for at in times}),
+                "span_hours": (max(times) - min(times)).total_seconds() / 3600 if len(times) >= 2 else 0.0,
+                "latest_at": max(times).isoformat() if times else None,
+            }
+        return result
+
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible snapshot with bounded pending and score data."""
         return {

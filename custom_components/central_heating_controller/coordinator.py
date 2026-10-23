@@ -82,7 +82,7 @@ from .const import (
     OPT_RESET_LEARNING_REQUESTED,
 )
 from .learning import HeatingRateLearner
-from .forecasting import ThermalForecaster
+from .forecasting import ThermalForecaster, ForecastPoint
 from .heating_cost import HeatingCostModel
 from .forecast_accuracy import ForecastAccuracyTracker
 from .forecast_inputs import ForecastInputs, _celsius
@@ -98,8 +98,9 @@ from .models import (
 )
 from .policy import evaluate_policy
 from .repairs import sync_missing_entity_issues
+from .readiness import evaluate_readiness
 from .storage import ControllerStore
-from .smart_schedule import plan_smart_schedule
+from .smart_schedule import plan_smart_schedule, parse_weekly_schedule, is_comfort_window
 from .travel import destination_is_home, preheat_timing
 
 _LOGGER = logging.getLogger(__name__)
@@ -264,6 +265,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._evaluation_idle.set()
         self._preview_context = None
         self._preview_cache = None
+        self._smart_target = None
+        self._smart_healthy_since: datetime | None = None
+        self._smart_health_context = None
+        self._smart_health_checked_at: datetime | None = None
+        self._command_error: str | None = None
 
     @property
     def controller_mode(self) -> str:
@@ -329,8 +335,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.forecast_accuracy = ForecastAccuracyTracker.from_dict(
                     self.persistent_state.forecast_accuracy, now=dt_util.utcnow()
                 )
+            elif self.persistent_state.smart_control_enabled:
+                # Consent for one room/sensor combination cannot authorise a
+                # different installation after it eventually learns again.
+                self.persistent_state.smart_control_enabled = False
+                await self.store.async_save(self.persistent_state)
 
             if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
+                self.persistent_state.smart_control_enabled = False
                 self.heating_cost_model = HeatingCostModel()
                 self.learner.reset()
                 self.thermal_model = ThermalForecaster()
@@ -380,6 +392,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         entity_id = event.data.get("entity_id")
         if entity_id == self.config[CONF_SCHEDULE]:
             self.forecast_inputs.invalidate_schedule(entity_id)
+            self._preview_cache = None
+            self._smart_healthy_since = None
         old_state = old_state if isinstance(old_state, State) else None
         new_state = new_state if isinstance(new_state, State) else None
         transition_probe = _CapturedEvent(
@@ -817,6 +831,28 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         except asyncio.CancelledError:
             self._skip_duplicate_listener_update = False
             raise
+        except Exception:
+            if not self.persistent_state.smart_control_enabled:
+                raise
+            _LOGGER.exception("Intelligent heating failed; restoring the existing schedule")
+            self._smart_healthy_since = None
+            result = self._fallback_result(dt_util.utcnow())
+            if self.data is None:
+                state = ControllerState(result, None, self.learner.rate, self.learner.trusted,
+                                        None, None, self.settings.fallback_warmup_minutes)
+            else:
+                state = replace(self.data, result=result)
+            readiness = {"ready": False, "checks": [{"key": "calculation", "label": "Heating calculation",
+                         "passed": False, "detail": "A calculation failed. The existing heating schedule is in control; check Home Assistant logs."}],
+                         "blockers": ["Heating calculation"]}
+            readiness.update(self._smart_control_description(readiness, False, result.status))
+            state = replace(state, smart_readiness=readiness,
+                            smart_plan={"state": "unavailable", "preview": True, "forecast": []},
+                            temperature_forecast={"forecast": [], "confidence": "learning",
+                                                  "reason": "Intelligent heating calculation failed"})
+            self._publish_state(state)
+            await self._async_apply_commands(self._climate_state(), result.hvac_mode, result.target_temperature)
+            return state
         finally:
             self._evaluation_idle.set()
 
@@ -945,6 +981,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             settings.eco_temperature,
             settings.active_hvac_mode,
         )
+        if self.persistent_state.smart_control_enabled:
+            fingerprint += (self._smart_period(now),)
         override_action = self._pending_override_action
         self._pending_override_action = None
         if override_action is not None:
@@ -1005,11 +1043,19 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             temperature_forecast=(self.data.temperature_forecast if self.data else {}),
             heating_cost=(self.data.heating_cost if self.data else {}),
             smart_plan=(self.data.smart_plan if self.data else {}),
+            smart_readiness=(self.data.smart_readiness if self.data else {}),
         )
-        if state != self.data:
-            self.async_set_updated_data(state)
-            self._skip_duplicate_listener_update = True
-        await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
+        # Urgent modes and legacy control never wait for planning. An opted-in
+        # Auto cycle waits for readiness before issuing exactly one target.
+        defer_control = (self.persistent_state.smart_control_enabled
+                         and self.controller_mode == "auto"
+                         and result.status not in (ControllerStatus.OFF, ControllerStatus.UNAVAILABLE,
+                                                   ControllerStatus.HEAT_BLAST, ControllerStatus.MANUAL_OVERRIDE))
+        input_signature = self._smart_input_signature()
+        cohort_signature = self._smart_input_signature(include_climate=False)
+        if not defer_control:
+            self._publish_state(state)
+            await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
         if (
             preserve_stale_echo
             and self.controller_mode == "auto"
@@ -1024,23 +1070,369 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._preview_context = None
         if config.get(CONF_WEATHER) and config.get(CONF_OUTDOOR_TEMP):
             forecast = await self._async_temperature_forecast(
-                now, state, climate, occupied, schedule_high, journey_home, preheat_ready
+                now, state, climate, occupied, schedule_high, journey_home, preheat_ready,
+                issue_accuracy=False,
             )
             state = replace(state, temperature_forecast=forecast)
+        # Ingest this cycle's meter intervals before deciding whether the gas
+        # relationship is still usable. A new poor fit must block this cycle.
         try:
             cost = await self._async_heating_cost(now, climate)
+            cost_ok = True
+        except Exception:
+            _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
+            cost_ok = False
+            cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
+                    for day in ("today", "tomorrow")}
+        preview = await self._async_smart_preview(now, state, occupied, journey_home)
+        readiness = self._smart_readiness(now, state, preview, occupied, journey_home)
+        if not cost_ok:
+            self._smart_healthy_since = None
+            readiness["ready"] = False
+            readiness["checks"].append({"key": "cost_inputs", "label": "Heating cost inputs",
+                                        "passed": False, "detail": "Heating cost inputs could not be processed."})
+            readiness["blockers"].append("Heating cost inputs")
+        active = defer_control and readiness["ready"]
+        if active:
+            target = self._safe_smart_target(now, state)
+            if target is None:
+                active = False
+                self._smart_healthy_since = None
+                readiness["ready"] = False
+                readiness["checks"].append({"key": "target", "label": "Safe thermostat target",
+                                            "passed": False, "detail": "The planned target is invalid or outside thermostat limits."})
+                readiness["blockers"].append("Safe thermostat target")
+            else:
+                status = (ControllerStatus.PREHEATING if not occupied and target > settings.eco_temperature
+                          else ControllerStatus.HIGH if target >= settings.high_temperature
+                          else ControllerStatus.LOW if occupied else ControllerStatus.AWAY)
+                result = ControlResult(status, target, settings.active_hvac_mode, "intelligent_schedule")
+                state = replace(state, result=result)
+        if defer_control:
+            # Only the chosen policy is scored; counterfactual preview forecasts
+            # must never be compared with temperatures from a different policy.
+            forecast = await self._async_temperature_forecast(
+                now, state, climate, occupied, schedule_high, journey_home, preheat_ready,
+                observe=False, issue_accuracy=False, smart_target=self._smart_target if active else None,
+            )
+            state = replace(state, temperature_forecast=forecast)
+            if active and not forecast.get("forecast"):
+                active = False
+                self._smart_healthy_since = None
+                result = self._fallback_result(dt_util.utcnow())
+                state = replace(state, result=result)
+                readiness["ready"] = False
+                readiness["blockers"].append("Live forecast unavailable")
+        if defer_control and input_signature != self._smart_input_signature():
+            active = False
+            self._smart_healthy_since = None
+            result = self._fallback_result(dt_util.utcnow())
+            state = replace(state, result=result)
+            readiness["ready"] = False
+            readiness["checks"].append({"key": "input_changed", "label": "Current inputs",
+                                        "passed": False, "detail": "Inputs changed while planning. Using the existing schedule while a new plan is calculated."})
+            readiness["blockers"].append("Inputs changed while planning")
+        readiness.update(self._smart_control_description(readiness, active, state.result.status))
+        if active:
+            preview = dict(preview, state="active", preview=False,
+                           explanation="Intelligent heating is controlling the thermostat. Safety checks are monitored continuously.")
+        try:
+            if defer_control:
+                cost = await self._async_heating_cost(now, climate)
             for details in cost.values():
                 details["forecast_confidence"] = state.temperature_forecast.get("confidence", "learning")
         except Exception:
             _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
             cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
                     for day in ("today", "tomorrow")}
-        preview = await self._async_smart_preview(now, state, occupied, journey_home)
-        state = replace(state, heating_cost=cost, smart_plan=preview)
+            if active:
+                self._smart_healthy_since = None
+                active = False
+                result = self._fallback_result(dt_util.utcnow())
+                readiness = dict(readiness, ready=False, blockers=readiness["blockers"] + ["Heating cost inputs"])
+                readiness.update(self._smart_control_description(readiness, False, result.status))
+                preview = dict(preview, state="preview", preview=True)
+                state = replace(state, result=result, temperature_forecast={"forecast": [], "confidence": "learning",
+                                    "reason": "Cost inputs changed; recalculating the existing schedule forecast"})
+        state = replace(state, heating_cost=cost, smart_plan=preview, smart_readiness=readiness)
+        if defer_control and input_signature != self._smart_input_signature():
+            # Service/storage awaits may admit a final mode change. Never send
+            # the superseded target, or score it as the policy in force.
+            self._smart_healthy_since = None
+            result = self._fallback_result(dt_util.utcnow())
+            readiness = dict(readiness, ready=False,
+                             blockers=readiness["blockers"] + ["Inputs changed while planning"])
+            readiness.update(self._smart_control_description(readiness, False, result.status))
+            state = replace(state, result=result, smart_readiness=readiness,
+                            smart_plan=dict(preview, state="preview", preview=True),
+                            temperature_forecast={"forecast": [], "confidence": "learning",
+                                                  "reason": "Inputs changed while planning; recalculating"})
+        self._publish_state(state)
+        if defer_control:
+            command_signature = self._smart_input_signature(include_climate=False)
+            await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
+            if self._command_error or command_signature != self._smart_input_signature(include_climate=False):
+                self._smart_healthy_since = None
+                result = self._fallback_result(dt_util.utcnow())
+                label = "Thermostat command failed" if self._command_error else "Inputs changed during thermostat command"
+                readiness = dict(readiness, ready=False, blockers=readiness["blockers"] + [label])
+                readiness["checks"] = readiness["checks"] + [{"key": "command_guard", "label": label,
+                    "passed": False, "detail": self._command_error or "Using the current mode and existing schedule while a new plan is calculated."}]
+                # One bounded attempt restores the current legacy intent even
+                # when a priority change arrived during set_temperature itself.
+                await self._async_apply_commands(self._climate_state(), result.hvac_mode,
+                                                 result.target_temperature)
+                readiness.update(self._smart_control_description(readiness, False, result.status))
+                state = replace(state, result=result, smart_readiness=readiness,
+                                smart_plan=dict(preview, state="preview", preview=True),
+                                temperature_forecast={"forecast": [], "confidence": "learning",
+                                                      "reason": label})
+                self._publish_state(state)
+        if not self._command_error and cohort_signature == self._smart_input_signature(include_climate=False):
+            await self._async_record_forecast(now, state.temperature_forecast)
+        return state
+
+    async def _async_record_forecast(self, now, forecast) -> None:
+        unit = forecast.get("temperature_unit")
+        points = []
+        for item in forecast.get("forecast", []):
+            at = dt_util.parse_datetime(str(item.get("datetime", "")))
+            temperature = _celsius(item.get("temperature"), unit)
+            if at is not None and at.tzinfo is not None and temperature is not None:
+                points.append(ForecastPoint(at, temperature, 0.0, None, False))
+        if points and self.forecast_accuracy.issue(now, tuple(points)):
+            self._copy_learning_state()
+            try:
+                await self.store.async_save(self.persistent_state)
+            except Exception:
+                _LOGGER.warning("Unable to persist forecast accuracy", exc_info=True)
+
+    def _publish_state(self, state: ControllerState) -> None:
         if state != self.data:
             self.async_set_updated_data(state)
             self._skip_duplicate_listener_update = True
-        return state
+
+    def _smart_input_signature(self, *, include_climate=True) -> tuple:
+        """Detect source changes while planning yields to the event loop."""
+        keys = (CONF_CLIMATE, CONF_HOME_ZONE, CONF_SCHEDULE, CONF_DESTINATION,
+                CONF_ARRIVAL_TIME, CONF_OUTDOOR_TEMP, CONF_WEATHER, CONF_HEATING_ACTIVITY,
+                CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION)
+        entities = [self.config.get(key) for key in keys] + self.config[CONF_PERSONS]
+        return (json.dumps(self.config, sort_keys=True),
+                self.controller_mode, self.persistent_state.smart_control_enabled,
+                self.persistent_state.blast_until, self.persistent_state.manual_override_target,
+                tuple((entity, state.last_updated if (state := self.hass.states.get(entity)) else None)
+                      for entity in entities if entity and (include_climate or entity != self.config[CONF_CLIMATE])))
+
+    def _fallback_result(self, now: datetime) -> ControlResult:
+        """Re-read priority modes and the legacy schedule after a changed input."""
+        settings = self.settings
+        climate = self._climate_state()
+        schedule = self.hass.states.get(self.config[CONF_SCHEDULE])
+        result = evaluate_policy(ControlInputs(
+            thermostat_available=self._available(climate),
+            auto_mode=self.persistent_state.auto_mode,
+            blast_active=self.persistent_state.blast_until is not None and self.persistent_state.blast_until > now,
+            manual_override_target=self.persistent_state.manual_override_target,
+            occupied=self._occupied(), schedule_high=schedule is not None and schedule.state == "on",
+            journey_home=self._journey_home(self.hass.states.get(self.config[CONF_DESTINATION])),
+            preheat_ready=self._preheat_ready(self.hass.states.get(self.config.get(CONF_ARRIVAL_TIME, "")), now),
+            current_temperature=None,
+            high_temperature=settings.high_temperature, low_temperature=settings.low_temperature,
+            eco_temperature=settings.eco_temperature, active_hvac_mode=settings.active_hvac_mode,
+            evaluated_at=now,
+        ))
+        if self.controller_mode == "away" and self._available(climate):
+            return ControlResult(ControllerStatus.AWAY, settings.eco_temperature,
+                                 settings.active_hvac_mode, "away_mode_latched")
+        return result
+
+    def _smart_period(self, now: datetime) -> str:
+        """Manual overrides end at a comfort/night boundary, never each replan."""
+        settings = self.smart_settings()
+        local = now.astimezone(dt_util.get_time_zone(self.hass.config.time_zone))
+        weekly = settings["weekly_schedule"]
+        if any(weekly.values()):
+            comfort = is_comfort_window(local, parse_weekly_schedule(weekly))
+        else:
+            schedule = self.hass.states.get(self.config[CONF_SCHEDULE])
+            comfort = schedule is not None and schedule.state == "on"
+        clock = local.strftime("%H:%M")
+        start, end = settings["night_start"], settings["night_end"]
+        night = start <= clock < end if start < end else clock >= start or clock < end
+        return "comfort" if comfort else "night" if night else "daytime"
+
+    def _smart_readiness(self, now, state, plan, occupied, journey_home) -> dict:
+        """Fail closed on missing evidence; require an hour of passing checks."""
+        def fresh(entity, limit):
+            return (self._available(entity) and timedelta(0) <= now - entity.last_reported <= limit)
+
+        def check(key, label, passed, detail):
+            return {"key": key, "label": label, "passed": bool(passed), "detail": detail}
+
+        climate = self._climate_state()
+        outdoor = self.hass.states.get(self.config.get(CONF_OUTDOOR_TEMP, ""))
+        weather = self.hass.states.get(self.config.get(CONF_WEATHER, ""))
+        schedule = self.hass.states.get(self.config[CONF_SCHEDULE])
+        people = [self.hass.states.get(entity) for entity in self.config[CONF_PERSONS]]
+        zone = self.hass.states.get(self.config[CONF_HOME_ZONE])
+        eta_id = self.config.get(CONF_ARRIVAL_TIME)
+        eta = self.hass.states.get(eta_id) if eta_id else None
+        destination = self.hass.states.get(self.config[CONF_DESTINATION])
+        arrival_ok = (not journey_home or occupied or (
+            fresh(destination, timedelta(minutes=30)) and fresh(eta, timedelta(minutes=30))
+            and state.arrival_time is not None and state.arrival_time >= now
+        ))
+        generated = dt_util.parse_datetime(str(plan.get("generated_at", "")))
+        plan_fresh = (generated is not None and generated.tzinfo is not None
+                      and timedelta(0) <= now - generated <= timedelta(minutes=6))
+        capabilities, error = (_climate_capabilities(climate, self.hass.config.units.temperature_unit)
+                               if climate else (None, "unavailable"))
+        rate = self.hass.states.get(self.config.get(CONF_GAS_RATE, ""))
+        rate_value = None
+        try:
+            if self._available(rate) and rate.attributes.get("unit_of_measurement") == "GBP/kWh":
+                rate_value = _finite_float(float(rate.state))
+        except (ValueError, TypeError, OverflowError):
+            pass
+        calibration = self.heating_cost_model.calibration()
+        interval = dt_util.parse_datetime(str(calibration.get("latest_interval_end", "")))
+        gas_fresh = (interval is not None and interval.tzinfo is not None
+                     and timedelta(0) <= now - interval <= timedelta(hours=72))
+        checks = [
+            check("thermostat", "Indoor temperature and thermostat",
+                  fresh(climate, timedelta(minutes=30)) and state.current_temperature is not None
+                  and not error and capabilities is not None
+                  and self.settings.active_hvac_mode in ("heat", "auto"),
+                  "Needs a valid heating thermostat and an indoor reading within 30 minutes."),
+            check("outdoor", "Outdoor temperature", fresh(outdoor, timedelta(hours=2)),
+                  "Needs a usable outdoor temperature reported within two hours."),
+            check("weather", "Weather forecast", self._available(weather) and bool(state.temperature_forecast.get("forecast")),
+                  state.temperature_forecast.get("reason") or "Needs a complete, usable 24-hour hourly weather forecast."),
+            check("demand", "Heating activity signal", self._heating_demand(climate) is not None,
+                  "Needs a valid heating demand reading within 30 minutes."),
+            check("occupancy", "Household presence", bool(people) and all(self._available(p) for p in people)
+                  and self._available(zone), "All configured people and the home zone must be available."),
+            check("schedule", "Existing fallback schedule", self._available(schedule) and schedule.state in ("on", "off"),
+                  "The existing on/off schedule must be available for fallback."),
+            check("arrival", "Arrival time", arrival_ok,
+                  "A homeward journey needs a valid future arrival time and fresh journey reports; otherwise existing preheating is used."),
+            check("plan_fresh", "Up-to-date heating plan", plan_fresh,
+                  "The plan must have been calculated within six minutes."),
+            check("gas_fresh", "Recent gas measurements", gas_fresh,
+                  "Needs a matched gas interval from the last 72 hours; delayed smart-meter readings are supported."),
+            check("preview_enabled", "Schedule planning enabled", self.smart_settings()["enabled"],
+                  "Enable schedule planning before using intelligent control."),
+            check("commands", "Thermostat commands", self._command_error is None,
+                  self._command_error or "No thermostat command failures are outstanding."),
+        ]
+        evidence = self.forecast_accuracy.readiness_metrics(now)
+        result = evaluate_readiness(now, forecast=state.temperature_forecast, plan=plan,
+                                    accuracy=evidence, input_checks=checks,
+                                    cost_calibration=calibration,
+                                    rate_available=rate_value is not None and rate_value > 0)
+        context = (json.dumps(self.smart_settings(), sort_keys=True), self.settings.high_temperature,
+                   self.settings.eco_temperature, tuple(self._learning_sources()), occupied,
+                   self.controller_mode)
+        if context != self._smart_health_context:
+            self._smart_healthy_since = None
+            self._smart_health_context = context
+        if (self._smart_health_checked_at is None or now < self._smart_health_checked_at
+                or now - self._smart_health_checked_at > timedelta(minutes=2)):
+            self._smart_healthy_since = None
+        self._smart_health_checked_at = now
+        if result["ready"]:
+            if self._smart_healthy_since is None or self._smart_healthy_since > now:
+                self._smart_healthy_since = now
+        else:
+            self._smart_healthy_since = None
+        minutes = ((now - self._smart_healthy_since).total_seconds() / 60
+                   if self._smart_healthy_since else 0)
+        stable = minutes >= 60
+        result["checks"].append(check("stable", "Consistent safety checks", stable,
+                                      f"{min(60, int(minutes))} of 60 consecutive minutes passing all checks. Restarts and failures restart this check."))
+        if not stable:
+            result["blockers"].append("Consistent safety checks")
+        result["ready"] = result["ready"] and stable
+        result["recent_accuracy"] = evidence
+        return result
+
+    def _smart_control_description(self, readiness, active, status) -> dict:
+        failed_labels = {item["label"] for item in readiness["checks"] if not item.get("passed")}
+        for index, label in enumerate(readiness["blockers"]):
+            if label not in failed_labels:
+                readiness["checks"].append({"key": f"live_guard_{index}", "label": label,
+                                             "passed": False, "detail": label})
+        enabled = self.persistent_state.smart_control_enabled
+        paused = self.controller_mode != "auto" or status in (
+            ControllerStatus.MANUAL_OVERRIDE, ControllerStatus.HEAT_BLAST, ControllerStatus.UNAVAILABLE)
+        if active:
+            control, explanation = "active", "Intelligent heating is controlling the thermostat."
+        elif enabled and paused:
+            control, explanation = "paused", "Intelligent heating is paused by the current mode or override."
+        elif enabled:
+            control, explanation = "fallback", "Using the existing heating schedule until all safety checks pass again."
+        else:
+            control = "preview"
+            explanation = ("Ready to enable. The existing heating schedule remains in control."
+                           if readiness["ready"] else "Preview only. The existing heating schedule remains in control while learning continues.")
+        if self._command_error:
+            explanation = self._command_error
+        learning_keys = {"thermal_windows", "model_score", "heating_response", "demand_model",
+                         "accuracy_1h", "accuracy_6h", "accuracy_24h", "gas_calibration"}
+        learning = any(item["key"] in learning_keys and not item["passed"] for item in readiness["checks"])
+        return {"state": "ready" if readiness["ready"] else "learning" if learning else "blocked",
+                "live_control_enabled": enabled, "control_state": control,
+                "explanation": explanation,
+                "fallback_reason": (self._command_error or ", ".join(readiness["blockers"])) if control == "fallback" else None}
+
+    def _safe_smart_target(self, now, state) -> float | None:
+        if self._smart_target is None or state.temperature_capabilities is None:
+            return None
+        cap = state.temperature_capabilities
+        try:
+            value = _finite_float(TemperatureConverter.convert(self._smart_target(now), "°C", cap.unit))
+        except (ValueError, TypeError, OverflowError):
+            return None
+        lower = min(self.settings.eco_temperature, self.smart_settings()["night_temperature"])
+        upper = self.settings.high_temperature
+        if value is None or not max(lower, cap.minimum) - 1e-6 <= value <= min(upper, cap.maximum) + 1e-6:
+            return None
+        if cap.step:
+            value = cap.minimum + math.ceil((value - cap.minimum) / cap.step - 1e-9) * cap.step
+        return round(value, 6) if value <= min(upper, cap.maximum) + 1e-6 else None
+
+    @staticmethod
+    def _target_transform(capabilities):
+        """Simulate the same min-anchored thermostat grid used by live commands."""
+        if capabilities is None:
+            return None
+        def transform(value):
+            cap = capabilities
+            native = TemperatureConverter.convert(value, "°C", cap.unit)
+            if cap.step:
+                native = cap.minimum + math.ceil((native - cap.minimum) / cap.step - 1e-9) * cap.step
+            if not cap.minimum - 1e-6 <= native <= cap.maximum + 1e-6:
+                raise ValueError("Planned temperature is outside thermostat limits")
+            return TemperatureConverter.convert(native, cap.unit, "°C")
+        return transform
+
+    async def async_set_smart_control(self, enabled: bool) -> None:
+        """Refresh before explicit opt-in; never arm an unready controller."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        if enabled:
+            await self.async_refresh()
+            if not self.data.smart_readiness.get("ready") or self.controller_mode != "auto":
+                raise HomeAssistantError("Intelligent heating is not ready. Review the remaining checks on the Heating dashboard.")
+        previous = self.persistent_state.smart_control_enabled
+        self.persistent_state.smart_control_enabled = enabled
+        try:
+            await self.store.async_save(self.persistent_state)
+        except Exception:
+            self.persistent_state.smart_control_enabled = previous
+            raise
+        await self.async_refresh()
 
     def smart_settings(self) -> dict:
         """Return native-unit settings even when no forecast is available."""
@@ -1084,25 +1476,36 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         settings = self.smart_settings()
         base = {"settings": settings, "preview": True, "forecast": [], "state": "disabled"}
         if not settings["enabled"] or self.controller_mode == "off":
+            self._smart_target = None
             return base | {"explanation": "Schedule preview is disabled"}
         if self._preview_context is None:
+            self._smart_target = None
             return base | {"state": "unavailable", "explanation": "Waiting for temperature and weather forecasts"}
         indoor, inputs, unit = self._preview_context
         arrival = state.arrival_time if journey_home and self.controller_mode == "auto" else None
         key = (round(indoor, 1), occupied, arrival, self.controller_mode,
-               json.dumps(settings, sort_keys=True), self.settings.high_temperature, self.settings.eco_temperature)
+               json.dumps(settings, sort_keys=True), self.settings.high_temperature, self.settings.eco_temperature,
+               self.thermal_model.sample_count, self.thermal_model.confidence,
+               self.forecast_inputs.revision, inputs.current_outdoor_temperature,
+               state.temperature_capabilities)
         cache = self._preview_cache
         if cache and cache[0] == key and timedelta(0) <= now - cache[1] < timedelta(minutes=5):
+            self._smart_target = cache[3]
             return cache[2]
         try:
             zone = dt_util.get_time_zone(self.hass.config.time_zone)
             local_now = now.astimezone(zone)
             use_weekly_schedule = any(settings["weekly_schedule"].values())
-            hours = 36
-            try:
-                inputs.outdoor_temperature(now + timedelta(hours=hours))
-            except ValueError:
-                hours = 24
+            tomorrow_end = (local_now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+            desired_hours = max(36, math.ceil((tomorrow_end.astimezone(now.tzinfo) - now).total_seconds() / 300) / 12)
+            hours = 24
+            for candidate in (desired_hours, 36):
+                try:
+                    inputs.outdoor_temperature(now + timedelta(hours=candidate))
+                    hours = candidate
+                    break
+                except ValueError:
+                    continue
             planner = partial(
                 plan_smart_schedule, local_now, indoor, inputs.outdoor_temperature,
                 deepcopy(self.thermal_model), settings["weekly_schedule"],
@@ -1113,6 +1516,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 daytime_drop=settings["daytime_drop"] * (5 / 9 if unit == "°F" else 1),
                 night_minimum=_celsius(settings["night_temperature"], unit),
                 away_eco=_celsius(self.settings.eco_temperature, unit), hours=hours,
+                target_transform=self._target_transform(state.temperature_capabilities),
             )
             plan = await self.hass.async_add_executor_job(planner)
             def native(value):
@@ -1139,9 +1543,17 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                               "heating_demand_percent": round(point.demand * 100, 1)}
                              for point in plan.points if point.at <= now + timedelta(hours=24)],
             }
-            self._preview_cache = (key, now, result)
+            # The callable and serialised points always belong to the same plan.
+            end = now + timedelta(hours=hours)
+            def bounded_target(at):
+                if at > end:
+                    raise ValueError("Intelligent plan does not cover this forecast horizon")
+                return plan.target_at(at)
+            self._smart_target = bounded_target
+            self._preview_cache = (key, now, result, bounded_target)
             return result
         except Exception:
+            self._smart_target = None
             _LOGGER.warning("Smart schedule preview unavailable", exc_info=True)
             return base | {"state": "unavailable", "explanation": "The schedule preview could not be calculated"}
 
@@ -1241,6 +1653,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     async def _async_temperature_forecast(
         self, now: datetime, state: ControllerState, climate: State | None,
         occupied: bool, schedule_high: bool, journey_home: bool, preheat_ready: bool,
+        *, observe: bool = True, issue_accuracy: bool = True, smart_target=None,
     ) -> dict:
         """Publish a conditional forecast without allowing weather failures to stop control."""
         config = self.config
@@ -1256,14 +1669,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             outside = None
         activity = self._heating_demand(climate)
         # Score the actual sensor report, not a held value re-labelled as a new reading.
-        accuracy_changed = self.forecast_accuracy.observe(
+        accuracy_changed = observe and self.forecast_accuracy.observe(
             climate.last_reported if climate is not None else now, indoor
         )
         # Learn independently of the forecast service's availability, using the
         # observed thermostat setpoint rather than a command awaiting acknowledgement.
         observed_target = (_celsius(climate.attributes.get(ATTR_TEMPERATURE), unit)
                            if climate is not None and climate.state != "off" else None)
-        model_changed = self.thermal_model.observe(
+        model_changed = observe and self.thermal_model.observe(
             now, indoor, outside, activity, target_temperature=observed_target
         )
         if model_changed or accuracy_changed:
@@ -1318,6 +1731,12 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                     return None
                 if result.hvac_mode is None and climate is not None and climate.state == "off":
                     return None
+                if smart_target is not None and result.status not in (
+                    ControllerStatus.HEAT_BLAST, ControllerStatus.MANUAL_OVERRIDE
+                ):
+                    # Replan at least every five minutes; hold this policy only
+                    # for the supported forecast horizon, never beyond it.
+                    return smart_target(at)
                 return _celsius(result.target_temperature, unit)
 
             prediction = self.thermal_model.forecast(now, indoor, inputs.outdoor_temperature, target)
@@ -1338,7 +1757,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 except ValueError:
                     # Preserve the valid 24h chart; a partial tomorrow must not look like a daily total.
                     pass
-            if self.forecast_accuracy.issue(now, prediction.points):
+            if issue_accuracy and self.forecast_accuracy.issue(now, prediction.points):
                 self._copy_learning_state()
                 try:
                     await self.store.async_save(self.persistent_state)
@@ -1391,6 +1810,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self, climate: State | None, desired_mode: str | None, desired_target: float | None
     ) -> None:
         """Apply policy intent in mode-then-temperature order."""
+        if not self.persistent_state.auto_mode and desired_mode is not None:
+            desired_mode, desired_target = HVACMode.OFF, None
+        priority = self._smart_input_signature(include_climate=False)
+        self._command_error = None
         if (
             self._commands_stopped
             or self._shutting_down
@@ -1419,6 +1842,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             except HomeAssistantError as err:
                 self._retire_command_record(self._hvac_command_records, mode_record)
                 _LOGGER.error("Failed setting HVAC mode for %s: %s", entity_id, err)
+                self._command_error = "The thermostat did not accept its heating mode. The existing schedule will retry."
+                return
             except BaseException:
                 self._retire_command_record(self._hvac_command_records, mode_record)
                 raise
@@ -1432,6 +1857,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         # The mode service may have changed the target or device availability.
         live_climate = self._climate_state()
+        if priority != self._smart_input_signature(include_climate=False):
+            result = self._fallback_result(dt_util.utcnow())
+            await self._async_apply_commands(live_climate, result.hvac_mode, result.target_temperature)
+            return
         if self._available(live_climate) and live_climate is not None:
             await self._async_apply_target_command(live_climate, desired_target)
 
@@ -1465,6 +1894,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         except HomeAssistantError as err:
             self._retire_command_record(self._target_command_records, target_record)
             _LOGGER.error("Failed setting target temperature for %s: %s", entity_id, err)
+            self._command_error = "The thermostat did not accept its target temperature. The existing schedule will retry."
         except BaseException:
             self._retire_command_record(self._target_command_records, target_record)
             raise
@@ -1509,6 +1939,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.heating_cost_model = HeatingCostModel()
         self.thermal_model = ThermalForecaster()
         self.forecast_accuracy = ForecastAccuracyTracker()
+        self.persistent_state.smart_control_enabled = False
+        self._smart_healthy_since = None
+        self._preview_cache = None
         self._copy_learning_state()
         await self.store.async_save(self.persistent_state)
         await self.async_refresh()

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.7.0 — 2026-10-23
+
+Adds a readiness indicator and explicit opt-in intelligent heating control. The
+update starts in preview and keeps the existing schedule in control. Overview
+shows which policy is running; Schedule and Learning explain the remaining
+learning, accuracy, input, gas-calibration and comfort checks.
+
+Live control requires recent measured forecast accuracy at 1, 6 and 24 hours,
+learnt thermal/demand response, a feasible plan and an hour of continuously
+passing checks. The enable action is rejected before readiness; it never arms
+a controller to activate for the first time automatically.
+
+After opting in, unsafe or stale inputs, invalid targets, calculation failures
+and thermostat command failures restore the existing schedule. Off, Away, Heat
+Blast and manual overrides retain priority, including changes arriving during
+planning or a thermostat command. Return to existing schedule removes consent;
+learning resets also disarm it. Forecasts and accuracy scoring follow the policy
+actually selected for live control. Gas estimates remain statistical and savings
+are not guaranteed.
+
+Update via HACS and restart Home Assistant. Replace the dashboard JavaScript
+with the attached file and update the existing resource URL to
+`/local/central-heating-controller-card.js?v=1.7.0`, then refresh. Existing dashboard
+and kiosk YAML remain valid.
+
+Validated with 532 Python tests, 62 JavaScript tests and desktop/phone browser checks.
+
 ## 1.6.0 — 2026-10-23
 
 ## Dedicated Heating dashboard

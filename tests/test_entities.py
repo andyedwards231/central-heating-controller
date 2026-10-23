@@ -244,6 +244,23 @@ async def test_entities_share_one_service_device_and_stable_unique_ids(hass, con
     assert device.entry_type is dr.DeviceEntryType.SERVICE
 
 
+async def test_intelligent_control_entities_match_dashboard_ids_and_start_in_preview(hass, controller):
+    entry, _ = controller
+    readiness_id = _entity_id(hass, entry, "sensor", "smart_heating_readiness")
+    control_id = _entity_id(hass, entry, "switch", "smart_heating_control")
+    assert readiness_id == "sensor.central_heating_controller_smart_heating_readiness"
+    assert control_id == "switch.central_heating_controller_smart_heating_control"
+    assert hass.states.get(control_id).state == "off"
+    readiness = hass.states.get(readiness_id)
+    assert readiness.state == "learning"
+    assert readiness.attributes["ready"] is False
+    assert readiness.attributes["control_state"] == "preview"
+    assert readiness.attributes["checks"]
+    with pytest.raises(HomeAssistantError, match="not ready"):
+        await hass.services.async_call("switch", "turn_on", {"entity_id": control_id}, blocking=True)
+    assert hass.states.get(control_id).state == "off"
+
+
 async def test_entity_states_availability_classes_units_and_attributes(hass, controller) -> None:
     """Entities publish modern state metadata and omit absent status details."""
     entry, _coordinator = controller

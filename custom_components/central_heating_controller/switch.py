@@ -22,7 +22,10 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the controller switches."""
-    async_add_entities([ControllerAutoModeSwitch(entry.runtime_data.coordinator, entry.entry_id)])
+    async_add_entities([
+        ControllerAutoModeSwitch(entry.runtime_data.coordinator, entry.entry_id),
+        SmartHeatingControlSwitch(entry.runtime_data.coordinator, entry.entry_id),
+    ])
 
 
 class ControllerAutoModeSwitch(ControllerEntity, SwitchEntity):
@@ -44,3 +47,23 @@ class ControllerAutoModeSwitch(ControllerEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable automatic control and command strict Off."""
         await self.coordinator.async_set_auto_mode(False)
+
+
+class SmartHeatingControlSwitch(ControllerEntity, SwitchEntity):
+    """Explicitly opt into guarded intelligent targets; upgrades default to off."""
+
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id, SwitchEntityDescription(
+            key="smart_heating_control", translation_key="smart_heating_control",
+            icon="mdi:calendar-check",
+        ))
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.persistent_state.smart_control_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_smart_control(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_smart_control(False)

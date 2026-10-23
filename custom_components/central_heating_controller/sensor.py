@@ -60,6 +60,7 @@ async def async_setup_entry(
             ControllerPreheatStartSensor(coordinator, entry.entry_id),
             ControllerTemperatureForecastSensor(coordinator, entry.entry_id),
             SmartHeatingPlanSensor(coordinator, entry.entry_id),
+            SmartHeatingReadinessSensor(coordinator, entry.entry_id),
             PredictedHeatingCostSensor(coordinator, entry.entry_id, "today"),
             PredictedHeatingCostSensor(coordinator, entry.entry_id, "tomorrow"),
         )
@@ -235,7 +236,7 @@ class PredictedHeatingCostSensor(ControllerEntity, SensorEntity):
 
 
 class SmartHeatingPlanSensor(ControllerEntity, SensorEntity):
-    """Expose a separate proposal without changing live thermostat control."""
+    """Expose the proposed or active intelligent schedule."""
 
     _unrecorded_attributes = frozenset({"forecast", "settings", "gap_drops"})
 
@@ -251,3 +252,23 @@ class SmartHeatingPlanSensor(ControllerEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self.coordinator.data.smart_plan or {"settings": self.coordinator.smart_settings(), "preview": True, "forecast": []}
+
+
+class SmartHeatingReadinessSensor(ControllerEntity, SensorEntity):
+    """Explain the learning and safety checks required for intelligent control."""
+
+    _unrecorded_attributes = frozenset({"checks", "blockers"})
+
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id, SensorEntityDescription(
+            key="smart_heating_readiness", translation_key="smart_heating_readiness",
+            icon="mdi:clipboard-check-outline",
+        ))
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.data.smart_readiness.get("state", "learning")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.data.smart_readiness

@@ -380,7 +380,7 @@ verified heating-only cost accuracy. Temperature forecasts continue to have thei
 separate checks against actual indoor temperatures.
 
 
-## Smart schedule preview and controller modes
+## Intelligent heating, preview and controller modes
 
 The smart schedule starts in **preview only**. It does not change the targets
 sent to your thermostat: the existing Home Assistant schedule remains in
@@ -397,7 +397,8 @@ The planner compares setbacks between comfort periods and earlier recovery
 starts, using the learned heating delay, demand response, heat loss, outdoor
 forecast and known arrival. Different gaps may use different drops, in 0.5°C
 steps up to your configured maximum. It minimises predicted heating demand
-across 36 hours when weather coverage permits (otherwise 24 hours), with an
+across at least 36 hours when weather coverage permits (otherwise 24 hours),
+extending through tomorrow when supported, with an
 estimated allowance for reheating any remaining temperature deficit at the
 end. It uses a bounded search; neither exact optimum nor cash savings are
 guaranteed. A flat unit gas rate makes demand a useful cost proxy. Shared
@@ -412,7 +413,8 @@ the live policy. A proposed schedule cannot be scored as though it had run.
 
 `select.central_heating_controller_controller_mode` offers these live modes:
 
-- **Auto:** normal control. Smart scheduling remains a preview in this release.
+- **Auto:** uses the existing schedule until intelligent heating is explicitly
+  enabled and every readiness check passes.
 - **Away:** holds the Eco temperature until a fresh homeward destination and
   valid future ETA are seen, or any tracked person returns after a confirmed
   absence. A person already home when Away is selected must leave and return;
@@ -429,6 +431,71 @@ preview. The legacy Auto switch remains compatible: on selects Auto, off
 selects Off.
 
 The `central_heating_controller.set_smart_schedule` action saves the complete
-preview settings against a controller entity. It is used by the card, so YAML
+planning settings against a controller entity. It is used by the card, so YAML
 editing is not necessary. Update the dashboard JavaScript separately from HACS;
 see [card installation](docs/lovelace-card.md).
+
+
+### Readiness and opt-in live control
+
+`sensor.central_heating_controller_smart_heating_readiness` explains each learning
+and safety requirement. Overview shows the current control state; Schedule has a
+collapsible checklist and **Enable intelligent heating** button; Learning shows
+the complete checklist. There is no automatic first activation. The separate
+`switch.central_heating_controller_smart_heating_control` defaults to off,
+rejects enabling while unready or outside Auto, and persists explicit consent.
+
+Readiness requires all of the following:
+
+- At least 40 usable 15-minute thermal windows, a model score of at least 0.5,
+  learnt heating response and learnt demand behaviour. These are learning checks,
+  not a probability or a guarantee of comfort.
+- Recent measured forecast errors from the last seven days. The 1-hour check
+  needs 24 comparisons, average error ≤0.3°C and absolute bias ≤0.2°C; 6-hour
+  needs 12, ≤0.5°C and ≤0.3°C; 24-hour needs 6, ≤1°C and ≤0.5°C.
+  The first two must span at least 48 hours and three UTC dates; the 24-hour
+  check spans at least 24 hours and two UTC dates. Every horizon needs a
+  measurement within six hours. Sparse thermostat reports can delay progress.
+- A feasible, non-provisional plan, calculated within six minutes, covering the
+  coming 24 hours. The planner allows at most 0.25°C predicted comfort shortfall.
+- A valid heating thermostat, indoor readings within 30 minutes, outdoor readings
+  within two hours, heating-demand readings within 30 minutes, usable hourly
+  weather, household presence inputs and the existing fallback schedule.
+  A qualifying homeward journey needs fresh destination/ETA reports and a future
+  ETA for intelligent arrival preheating; otherwise legacy preheating applies.
+- A usable gas calibration, positive GBP/kWh rate and a matched gas interval
+  within 72 hours. Calibration already requires 30 intervals over three dates,
+  including six heating and six non-heating intervals with sufficient variation
+  and an acceptably stable fit. Shared hot-water consumption remains an
+  attribution uncertainty, even after these checks pass.
+- All checks passing continuously for an hour. Missing a coordinator check for
+  over two minutes, restarting, changing the planning context or failing a
+  requirement restarts this confirmation period.
+
+Until enabled, **preview** means calculating a proposal without applying its
+targets. Heating follows the existing schedule: High during scheduled warmth,
+Low outside those periods while occupied, Eco while away, and the existing
+arrival preheating, Heat Blast and manual overrides. Editing preview times or
+night settings does not change this fallback schedule. Changing the comfort
+setpoint still changes the live High setting.
+
+Once enabled in Auto, the integration sends the current safe target from its
+intelligent plan, recalculating at least every five minutes. Thermostat limits
+and temperature steps apply to both simulations and commands. Off, latched Away,
+Heat Blast and manual overrides retain priority. The actual forecast, cost
+estimates and accuracy scoring then follow the intelligent plan rather than the
+counterfactual legacy policy. Later replanning, weather, occupancy and manual
+changes can still affect measured errors.
+
+A failed requirement, stale input, invalid target, calculation error or command
+failure returns control to the existing schedule and explains the reason.
+After explicit opt-in, intelligent heating resumes only once every check passes
+again for an hour. **Return to existing schedule** removes consent immediately;
+learning continues in preview and it cannot resume automatically. Resetting
+learning also removes consent. If the thermostat is offline, commands cannot
+be guaranteed; Home Assistant reports the failure and retries legacy control.
+
+The cost objective minimises predicted demand at the current constant gas rate.
+Passing readiness does not prove cash savings or validate counterfactual comfort.
+Check real comfort and consumption after activation; no automatic activation or
+financial guarantee is provided.

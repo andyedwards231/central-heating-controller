@@ -223,6 +223,8 @@ class HeatingCostModel:
             "observation_count": len(observations),
             "first_observation": observations[0].isoformat() if observations else None,
             "last_observation": observations[-1].isoformat() if observations else None,
+            "latest_interval_end": max((end for _, end in self._samples), default=None).isoformat()
+                if self._samples else None,
         })
         result["assumption"] = "Estimated heating attribution; baseline gas may include hot water and boiler losses."
         return result

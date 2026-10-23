@@ -124,6 +124,7 @@ def plan_smart_schedule(
     night_minimum: float = 16.0,
     away_eco: float = 16.0,
     hours: float = 36,
+    target_transform: Callable[[float], float] | None = None,
 ) -> SmartSchedulePlan:
     """Choose a bounded drop and adaptive recovery lead by simulated demand.
 
@@ -237,7 +238,7 @@ def plan_smart_schedule(
         return max_drop
 
     def make_target(values: list[float], lead: int) -> Callable[[datetime], float]:
-        def target(at: datetime) -> float:
+        def raw_target(at: datetime) -> float:
             at_local = local(at)
             at_utc = at.astimezone(timezone.utc)
             drop = selected_gap_drop(at_utc, values)
@@ -248,6 +249,9 @@ def plan_smart_schedule(
                             for start, _ in comfort_ranges):
                 return float(comfort_temperature)
             return base_target(at_local, drop)
+        def target(at: datetime) -> float:
+            value = raw_target(at)
+            return target_transform(value) if target_transform else value
         return target
 
     def evaluate(values: list[float], lead: int):

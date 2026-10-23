@@ -4,6 +4,9 @@
     "switch": {
       "auto_mode": {
         "name": "Auto mode"
+      },
+      "smart_heating_control": {
+        "name": "Intelligent heating control"
       }
     },
     "button": {
@@ -62,6 +65,14 @@
       },
       "smart_heating_plan": {
         "name": "Smart heating plan"
+      },
+      "smart_heating_readiness": {
+        "name": "Intelligent heating readiness",
+        "state": {
+          "ready": "Ready",
+          "learning": "Learning",
+          "blocked": "Needs attention"
+        }
       }
     },
     "select": {
@@ -97,7 +108,7 @@
       },
       "settings": {
         "title": "Configure heating",
-        "description": "Choose the temperatures and warm-up limits used by the controller. Smart schedule settings provide a preview only. Comfort windows are day-by-day: each period must start before it ends and cannot cross midnight.",
+        "description": "Choose the temperatures and warm-up limits used by the controller. Schedule planning starts in preview. Live control requires a separate opt-in after readiness checks pass. Comfort windows are day-by-day: each period must start before it ends and cannot cross midnight.",
         "data": {
           "active_hvac_mode": "Active HVAC mode",
           "high_temperature": "High temperature",
@@ -106,7 +117,7 @@
           "fallback_warmup_minutes": "Fallback warm-up duration",
           "maximum_warmup_minutes": "Maximum warm-up duration",
           "destination_home_value": "Destination value meaning home (optional)",
-          "smart_schedule_enabled": "Enable smart schedule preview (preview only)",
+          "smart_schedule_enabled": "Enable intelligent schedule planning",
           "smart_comfort_schedule": "Weekly comfort periods (JSON)",
           "smart_night_start": "Night starts",
           "smart_night_end": "Night ends",
@@ -137,7 +148,7 @@
       "invalid_comfort_schedule": "Enter a weekly JSON object with valid, non-overlapping start and end times.",
       "invalid_smart_time": "Enter a time in 24-hour HH:MM format.",
       "smart_temperature_out_of_range": "Night temperature must be within thermostat limits and no higher than the high temperature.",
-      "invalid_daytime_drop": "Daytime drop must be between 0 and 5 °C (or the equivalent in °F)."
+      "invalid_daytime_drop": "Daytime drop must be between 0 and 5 \u00b0C (or the equivalent in \u00b0F)."
     }
   },
   "issues": {

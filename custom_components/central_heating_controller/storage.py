@@ -126,6 +126,7 @@ class ControllerStore:
 
         return PersistentState(
             auto_mode=auto_mode if isinstance(auto_mode, bool) else True,
+            smart_control_enabled=raw.get("smart_control_enabled") is True,
             forced_away=raw.get("forced_away") is True,
             away_seen_absent=[v for v in raw.get("away_seen_absent", []) if isinstance(v, str)]
                 if isinstance(raw.get("away_seen_absent"), list) else [],
@@ -145,6 +146,7 @@ class ControllerStore:
         await self._store.async_save(
             {
                 "auto_mode": state.auto_mode,
+                "smart_control_enabled": state.smart_control_enabled,
                 "forced_away": state.forced_away,
                 "away_seen_absent": state.away_seen_absent,
                 "away_selected_at": state.away_selected_at.isoformat() if state.away_selected_at else None,
