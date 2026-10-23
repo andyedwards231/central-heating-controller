@@ -38,3 +38,6 @@ HEAT_BLAST_MINUTES = 60
 CONF_WEATHER = "weather_entity"
 CONF_OUTDOOR_TEMP = "outdoor_temperature_entity"
 CONF_HEATING_ACTIVITY = "heating_activity_entity"
+CONF_GAS_RATE = "gas_rate_entity"
+CONF_GAS_CONSUMPTION = "gas_consumption_entity"
+CONF_GAS_PREVIOUS_CONSUMPTION = "gas_previous_consumption_entity"

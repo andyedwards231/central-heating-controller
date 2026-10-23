@@ -160,6 +160,7 @@ async def test_storage_round_trip_serializes_only_persistent_fields(hass) -> Non
         "learned_sample_count": 4,
         "thermal_model": {},
         "forecast_accuracy": {},
+        "heating_cost": {},
     }
     assert "pending_target" not in save.await_args.args[0]
 
@@ -2241,3 +2242,56 @@ async def test_intermediate_matter_report_does_not_consume_target_acknowledgemen
     assert coordinator.pending_target is None
     assert coordinator.persistent_state.manual_override_target is None
     assert coordinator.data.status is ControllerStatus.LOW
+
+@pytest.mark.asyncio
+async def test_heating_cost_filters_gas_and_passes_full_local_days(hass):
+    from custom_components.central_heating_controller.const import (
+        CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION,
+    )
+    _set_baseline_states(hass)
+    hass.config.time_zone = "Europe/London"
+    data = {CONF_GAS_RATE: "sensor.gas_rate", CONF_GAS_CONSUMPTION: "sensor.gas",
+            CONF_GAS_PREVIOUS_CONSUMPTION: "sensor.old_gas"}
+    hass.states.async_set("sensor.gas_rate", "0.09", {"unit_of_measurement": "GBP/kWh"})
+    valid = {"start": (NOW - timedelta(hours=2)).isoformat(),
+             "end": (NOW - timedelta(minutes=90)).isoformat(), "consumption": 1.2}
+    future = {"start": NOW.isoformat(), "end": (NOW + timedelta(minutes=30)).isoformat(), "consumption": 0}
+    hass.states.async_set("sensor.gas", "1.2", {"unit_of_measurement": "kWh", "charges": [valid, future]})
+    hass.states.async_set("sensor.old_gas", "3", {"unit_of_measurement": "kWh", "is_estimated": True,
+                                                "charges": [valid]})
+    coordinator, _ = await _setup_coordinator(hass, data=data)
+    model = Mock()
+    model.predict_day.return_value = {"cost_gbp": 1.23, "reason": None}
+    model.export_state.return_value = {}
+    model.calibration.return_value = {}
+    coordinator.heating_cost_model = model
+    result = await coordinator._async_heating_cost(NOW, hass.states.get("climate.hallway"))
+    rows, stamp = model.ingest.call_args.args
+    assert len(rows) == 1
+    assert rows[0]["consumption_kwh"] == 1.2
+    assert stamp == NOW
+    today, tomorrow = model.predict_day.call_args_list
+    assert today.args[0].hour == 0 and today.args[1].hour == 0
+    assert tomorrow.args[0] == today.args[1]
+    assert (tomorrow.args[1] - tomorrow.args[0]) == timedelta(days=1)
+    assert today.args[-1] == 0.09
+    assert result["today"]["excludes"] == "Standing charge and fitted background gas use"
+
+@pytest.mark.asyncio
+async def test_heating_cost_failure_does_not_stop_heating_control(hass):
+    _set_baseline_states(hass)
+    coordinator, _ = await _setup_coordinator(hass)
+    coordinator._async_heating_cost = AsyncMock(side_effect=ValueError("bad gas data"))
+    await coordinator.async_refresh()
+    assert coordinator.data.heating_cost["today"]["cost_gbp"] is None
+    assert coordinator.data.status != ControllerStatus.UNAVAILABLE
+
+
+async def test_heating_cost_storage_preserves_multi_day_observation_history(hass):
+    store = ControllerStore(hass, "cost-history")
+    observations = [{"at": (NOW - timedelta(minutes=i)).isoformat(), "demand": 0.13}
+                    for i in range(4500)]
+    state = PersistentState(heating_cost={"version": 1, "observations": observations})
+    await store.async_save(state)
+    restored = await store.async_load()
+    assert restored.heating_cost["observations"] == observations

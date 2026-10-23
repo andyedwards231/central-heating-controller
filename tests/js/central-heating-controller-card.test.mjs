@@ -424,3 +424,13 @@ test("kiosk supports Fahrenheit and missing live status without inventing readin
   assert.match(card.shadowRoot.innerHTML, /chc-kiosk-now">—/);
   assert.match(card.shadowRoot.innerHTML, /<svg/);
 });
+
+test("main control and visual cards shade forecast heating with the same cached renderer", () => {
+  for (const mode of ["control", "visual"]) {
+    const card = new Card();
+    card.setConfig({ entity: "sensor.central_heating_controller_status", mode });
+    card.hass = kiosk([forecastPoint(0, 13), forecastPoint(5, 0), forecastPoint(10, 0)]).hass;
+    assert.equal((card.shadowRoot.innerHTML.match(/<rect class="chc-heating-band"/g) || []).length, 1);
+    assert.match(card.shadowRoot.innerHTML, /Heating expected/);
+  }
+});

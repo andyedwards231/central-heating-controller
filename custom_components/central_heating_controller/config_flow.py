@@ -45,6 +45,7 @@ from .const import (
     CONF_WEATHER,
     CONF_OUTDOOR_TEMP,
     CONF_HEATING_ACTIVITY,
+    CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION,
     DEFAULT_ECO_C,
     DEFAULT_ECO_F,
     DEFAULT_FALLBACK_MINUTES,
@@ -142,6 +143,15 @@ def _entity_schema() -> vol.Schema:
             vol.Optional(CONF_HEATING_ACTIVITY): _NullableEntitySelector(
                 selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
             ),
+            vol.Optional(CONF_GAS_RATE): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+            vol.Optional(CONF_GAS_CONSUMPTION): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+            vol.Optional(CONF_GAS_PREVIOUS_CONSUMPTION): _NullableEntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
         }
     )
 
@@ -226,6 +236,13 @@ def _normalize_entity_input(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_WEATHER: user_input.get(CONF_WEATHER) or None,
         CONF_OUTDOOR_TEMP: user_input.get(CONF_OUTDOOR_TEMP) or None,
         CONF_HEATING_ACTIVITY: user_input.get(CONF_HEATING_ACTIVITY) or None,
+    } | {
+        field: user_input.get(field) or None
+        for field in (
+            CONF_GAS_RATE, CONF_GAS_CONSUMPTION,
+            CONF_GAS_PREVIOUS_CONSUMPTION,
+        )
+        if field in user_input
     }
 
 
@@ -255,7 +272,8 @@ def _validate_entities(
         if any(hass.states.get(entity_id) is None for entity_id in entity_ids):
             return {field: "entity_not_found"}, None
 
-    for field in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY):
+    for field in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY, CONF_GAS_RATE,
+                  CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION):
         if user_input.get(field) and hass.states.get(user_input[field]) is None:
             return {field: "entity_not_found"}, None
 

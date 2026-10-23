@@ -395,8 +395,8 @@ class ThermalForecaster:
             or not 1 <= step_minutes <= 60
         ):
             raise ValueError("step_minutes must be an integer from 1 to 60")
-        if duration > 24:
-            raise ValueError("forecast duration cannot exceed 24 hours")
+        if duration > 49:
+            raise ValueError("forecast duration cannot exceed 49 hours")
         minute = timedelta(minutes=1)
         total_minutes = int(duration * 60)
         heating = False

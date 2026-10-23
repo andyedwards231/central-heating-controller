@@ -62,6 +62,9 @@ from .const import (
     CONF_MAX_WARMUP_MINUTES,
     CONF_PERSONS,
     CONF_SCHEDULE,
+    CONF_GAS_RATE,
+    CONF_GAS_CONSUMPTION,
+    CONF_GAS_PREVIOUS_CONSUMPTION,
     CONF_WEATHER,
     CONF_OUTDOOR_TEMP,
     CONF_HEATING_ACTIVITY,
@@ -71,6 +74,7 @@ from .const import (
 )
 from .learning import HeatingRateLearner
 from .forecasting import ThermalForecaster
+from .heating_cost import HeatingCostModel
 from .forecast_accuracy import ForecastAccuracyTracker
 from .forecast_inputs import ForecastInputs, _celsius
 from .models import (
@@ -218,6 +222,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.store = ControllerStore(hass, entry.entry_id)
         self.persistent_state = PersistentState()
         self.learner = HeatingRateLearner()
+        self.heating_cost_model = HeatingCostModel()
+        self._cost_forecast = []
+        self._cost_saved_at = None
         self.thermal_model = ThermalForecaster()
         self.forecast_inputs = ForecastInputs(hass)
         self.forecast_accuracy = ForecastAccuracyTracker()
@@ -272,6 +279,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 self.persistent_state.learned_sample_count,
             )
 
+            stored_cost = self.persistent_state.heating_cost
+            if isinstance(stored_cost, dict) and stored_cost.get("sources") == self._cost_sources():
+                self.heating_cost_model = HeatingCostModel.restore_state(stored_cost, now=dt_util.utcnow())
             stored_model = self.persistent_state.thermal_model
             if isinstance(stored_model, dict) and stored_model.get("sources") == self._learning_sources():
                 self.thermal_model = ThermalForecaster.from_dict(stored_model)
@@ -280,6 +290,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 )
 
             if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
+                self.heating_cost_model = HeatingCostModel()
                 self.learner.reset()
                 self.thermal_model = ThermalForecaster()
                 self.forecast_accuracy = ForecastAccuracyTracker()
@@ -302,7 +313,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             ]
             if config.get(CONF_ARRIVAL_TIME):
                 entity_ids.append(config[CONF_ARRIVAL_TIME])
-            entity_ids.extend(config[key] for key in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY) if config.get(key))
+            entity_ids.extend(config[key] for key in (CONF_WEATHER, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY, CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION) if config.get(key))
             for entity_id in dict.fromkeys(entity_ids):
                 self._event_unsubscribers.append(
                     async_track_state_change_event(self.hass, entity_id, self._handle_state_change)
@@ -750,6 +761,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.persistent_state.learned_sample_count = self.learner.sample_count
         self.persistent_state.thermal_model = self.thermal_model.to_dict() | {"sources": self._learning_sources()}
         self.persistent_state.forecast_accuracy = self.forecast_accuracy.to_dict()
+        self.persistent_state.heating_cost = self.heating_cost_model.export_state() | {"sources": self._cost_sources()}
 
     async def _async_update_data(self) -> ControllerState:
         """Track a complete evaluation so shutdown can await it."""
@@ -925,6 +937,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             temperature_capabilities=temperature_capabilities,
             auto_mode=self.persistent_state.auto_mode,
             temperature_forecast=(self.data.temperature_forecast if self.data else {}),
+            heating_cost=(self.data.heating_cost if self.data else {}),
         )
         if state != self.data:
             self.async_set_updated_data(state)
@@ -939,15 +952,84 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 climate, self.persistent_state.manual_override_target
             )
         self._stale_own_target_echo = False
+        self._cost_forecast = []
         if config.get(CONF_WEATHER) and config.get(CONF_OUTDOOR_TEMP):
             forecast = await self._async_temperature_forecast(
                 now, state, climate, occupied, schedule_high, journey_home, preheat_ready
             )
             state = replace(state, temperature_forecast=forecast)
-            if state != self.data:
-                self.async_set_updated_data(state)
-                self._skip_duplicate_listener_update = True
+        try:
+            cost = await self._async_heating_cost(now, climate)
+            for details in cost.values():
+                details["forecast_confidence"] = state.temperature_forecast.get("confidence", "learning")
+        except Exception:
+            _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
+            cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
+                    for day in ("today", "tomorrow")}
+        state = replace(state, heating_cost=cost)
+        if state != self.data:
+            self.async_set_updated_data(state)
+            self._skip_duplicate_listener_update = True
         return state
+
+    def _cost_sources(self) -> list[str | None]:
+        return [self.config.get(key) for key in
+                (CONF_CLIMATE, CONF_HEATING_ACTIVITY, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION)]
+
+    async def _async_heating_cost(self, now: datetime, climate: State | None) -> dict:
+        config = self.config
+        if not config.get(CONF_GAS_RATE) or not config.get(CONF_GAS_CONSUMPTION):
+            return {}
+        demand = self._heating_demand(climate)
+        self.heating_cost_model.observe(now, float(demand) if demand is not None else None)
+        intervals = []
+        for key in (CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION):
+            source = self.hass.states.get(config.get(key, "")) if config.get(key) else None
+            if not self._available(source) or source is None:
+                continue
+            if source.attributes.get("unit_of_measurement") != "kWh" or source.attributes.get("is_estimated") is True:
+                continue
+            charges = source.attributes.get("charges", [])
+            if not isinstance(charges, list):
+                continue
+            for item in charges:
+                if not isinstance(item, dict):
+                    continue
+                start = dt_util.parse_datetime(str(item.get("start", "")))
+                end = dt_util.parse_datetime(str(item.get("end", "")))
+                # Ignore the latest/incomplete meter interval and future placeholder zeroes.
+                if start is None or end is None or start.tzinfo is None or end.tzinfo is None or end > now - timedelta(minutes=30):
+                    continue
+                intervals.append({"start": start, "end": end,
+                                  "consumption_kwh": _finite_float(item.get("consumption_kwh", item.get("consumption")))})
+        self.heating_cost_model.ingest(intervals, now)
+        rate_state = self.hass.states.get(config[CONF_GAS_RATE])
+        rate = None
+        if (self._available(rate_state) and rate_state is not None
+                and rate_state.attributes.get("unit_of_measurement") == "GBP/kWh"):
+            try:
+                rate = _finite_float(float(rate_state.state))
+            except (ValueError, TypeError, OverflowError):
+                pass
+        zone = dt_util.get_time_zone(self.hass.config.time_zone)
+        start = now.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        result = {}
+        for index, name in enumerate(("today", "tomorrow")):
+            left, right = start + timedelta(days=index), start + timedelta(days=index + 1)
+            result[name] = self.heating_cost_model.predict_day(left, right, now, self._cost_forecast, rate)
+            result[name].update({"date": left.date().isoformat(), "rate_gbp_per_kwh": rate,
+                                 "rate_assumption": "Current unit rate held constant for the whole day",
+                                 "calibration": self.heating_cost_model.calibration(),
+                                 "excludes": "Standing charge and fitted background gas use",
+                                 "attribution": "Statistical estimate; hot water during heating can bias the split"})
+        if self._cost_saved_at is None or now - self._cost_saved_at >= timedelta(minutes=5):
+            self._copy_learning_state()
+            try:
+                await self.store.async_save(self.persistent_state)
+                self._cost_saved_at = now
+            except Exception:
+                _LOGGER.warning("Unable to persist heating cost learning", exc_info=True)
+        return result
 
     def _heating_active(self, climate: State | None) -> bool | None:
         """Keep the legacy net-rise learner limited to binary activity sources."""
@@ -1063,6 +1145,23 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 return _celsius(result.target_temperature, unit)
 
             prediction = self.thermal_model.forecast(now, indoor, inputs.outdoor_temperature, target)
+            self._cost_forecast = [{"datetime": point.at.isoformat(), "heating_demand_percent": point.demand * 100}
+                                   for point in prediction.points]
+            if config.get(CONF_GAS_RATE) and config.get(CONF_GAS_CONSUMPTION):
+                # Tomorrow means the complete local calendar day, including DST changes.
+                zone = dt_util.get_time_zone(self.hass.config.time_zone)
+                local = now.astimezone(zone)
+                end = (local + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+                end_utc = end.astimezone(now.tzinfo)
+                hours = math.ceil((end_utc - now).total_seconds() / 300) / 12
+                override_valid = True
+                try:
+                    extended = self.thermal_model.forecast(now, indoor, inputs.outdoor_temperature, target, hours=hours)
+                    self._cost_forecast = [{"datetime": point.at.isoformat(), "heating_demand_percent": point.demand * 100}
+                                           for point in extended.points]
+                except ValueError:
+                    # Preserve the valid 24h chart; a partial tomorrow must not look like a daily total.
+                    pass
             if self.forecast_accuracy.issue(now, prediction.points):
                 self._copy_learning_state()
                 try:
@@ -1220,6 +1319,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     async def async_reset_learning(self) -> None:
         """Clear the learned model and immediately re-evaluate."""
         self.learner.reset()
+        self.heating_cost_model = HeatingCostModel()
         self.thermal_model = ThermalForecaster()
         self.forecast_accuracy = ForecastAccuracyTracker()
         self._copy_learning_state()

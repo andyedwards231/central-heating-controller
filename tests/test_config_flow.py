@@ -28,6 +28,9 @@ from custom_components.central_heating_controller.const import (
     CONF_DESTINATION_HOME_VALUE,
     CONF_ECO_TEMP,
     CONF_FALLBACK_MINUTES,
+    CONF_GAS_CONSUMPTION,
+    CONF_GAS_PREVIOUS_CONSUMPTION,
+    CONF_GAS_RATE,
     CONF_HIGH_TEMP,
     CONF_HOME_ZONE,
     CONF_LOW_TEMP,
@@ -192,6 +195,11 @@ async def test_user_schema_uses_constrained_entity_selectors(
     assert "domain" not in fields[CONF_DESTINATION][1].config
     assert "domain" not in fields[CONF_ARRIVAL_TIME][1].config
     assert isinstance(fields[CONF_ARRIVAL_TIME][0], vol.Optional)
+
+    for field in (CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION):
+        assert isinstance(fields[field][1], selector.EntitySelector)
+        assert fields[field][1].config["domain"] == ["sensor"]
+        assert isinstance(fields[field][0], vol.Optional)
 
 
 @pytest.mark.asyncio

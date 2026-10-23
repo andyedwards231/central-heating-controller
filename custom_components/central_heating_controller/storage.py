@@ -56,6 +56,27 @@ def _fingerprint(value: object) -> tuple[JsonPrimitive, ...] | None:
     return tuple(value)
 
 
+def _json_mapping(value: object) -> dict:
+    """Return a JSON-safe mapping with bounded nesting, or an empty mapping if malformed."""
+    if not isinstance(value, dict):
+        return {}
+
+    def clean(item: object, depth: int = 0) -> object:
+        if depth > 8:
+            return None
+        if item is None or isinstance(item, (str, bool, int)):
+            return item
+        if isinstance(item, float):
+            return item if math.isfinite(item) else None
+        if isinstance(item, dict):
+            return {key: clean(val, depth + 1) for key, val in item.items() if isinstance(key, str)}
+        if isinstance(item, (list, tuple)):
+            return [clean(val, depth + 1) for val in item]
+        return None
+
+    return clean(value)
+
+
 class ControllerStore:
     """Persist independently validated controller state fields."""
 
@@ -112,6 +133,7 @@ class ControllerStore:
             learned_sample_count=count if learned_consistent else 0,
             thermal_model=raw.get("thermal_model", {}),
             forecast_accuracy=raw.get("forecast_accuracy", {}),
+            heating_cost=_json_mapping(raw.get("heating_cost", {})),
         )
 
     async def async_save(self, state: PersistentState) -> None:
@@ -134,5 +156,6 @@ class ControllerStore:
                 "learned_sample_count": state.learned_sample_count,
                 "thermal_model": state.thermal_model,
                 "forecast_accuracy": state.forecast_accuracy,
+                "heating_cost": _json_mapping(state.heating_cost),
             }
         )

@@ -333,3 +333,43 @@ preventing thermostat control. Input requests are cached for 15 minutes with
 bounded failure retries; schedule state changes invalidate its cache immediately.
 The full curve is excluded from recorder attributes to avoid storing a large
 chart payload every minute.
+
+
+## Predicted heating costs
+
+Optional **Predicted heating cost today** and **Predicted heating cost tomorrow**
+sensors estimate the heating portion of your gas bill in GBP. In the integration's
+configuration, select a current gas unit rate (`GBP/kWh`), current Octopus gas
+consumption (`kWh`, with half-hour `charges` attributes), and optionally the previous
+consumption entity so delayed readings can be matched to stored heating demand.
+Keep the heating activity source configured, for example `sensor.hall_heating_power`.
+A cumulative meter total without timestamped intervals cannot calibrate this model.
+
+For a combi boiler, gas also supplies hot water. The model fits gas consumption
+against average heating demand, with a separate background allowance. Only the
+fitted demand-linked component is charged to heating. This is a statistical
+attribution, not a measurement of heating-only consumption: hot water used at the
+same time as heating can bias it. An intermittent camera water meter is not used
+as evidence that hot water was or was not running.
+
+Learning requires at least 30 complete half-hour intervals across three dates,
+including six with at least 10% demand and six with at most 5% demand. Demand must
+vary enough to identify a relationship, and unstable fits are rejected. These
+are minimum requirements, not a promise of calibration after three days. Demand
+and calibration persist for 14 days so delayed gas readings can be matched by
+their interval timestamps. Estimated supplier readings and the most recent
+half-hour are excluded; later corrections replace earlier samples.
+
+Today's value estimates the whole local day: observed demand since midnight plus
+forecast demand to midnight. Tomorrow covers its whole local calendar day. Both
+use the current unit rate, held constant, without a standing charge. Tomorrow
+requires weather coverage through the end of tomorrow. Missing demand history,
+missing forecast coverage, an invalid rate or insufficient learning leaves the
+sensor unavailable; the `reason` attribute explains why. Restart gaps longer
+than five minutes can leave today's total unavailable until the next full day.
+
+Attributes expose the fitted coefficient, background gas allowance, sample
+counts, median absolute fit error, demand spread diagnostic, forecast confidence
+and tariff assumption. Fit errors describe the shared gas model, not independently
+verified heating-only cost accuracy. Temperature forecasts continue to have their
+separate checks against actual indoor temperatures.

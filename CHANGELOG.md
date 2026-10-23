@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.0 — 2026-10-23
+
+- Shade expected heating periods on the main control and visual cards, retaining
+  the rendering and caching improvements from 1.3.1.
+- Add optional predicted heating cost today and tomorrow sensors in GBP. Learn
+  the demand-linked share of gas consumption from timestamped Octopus half-hour
+  readings, using a fitted background allowance for shared-boiler hot water.
+- Require varied observations across at least three dates, reject unstable fits,
+  and expose calibration diagnostics. These are statistical heating estimates;
+  hot-water use correlated with heating cannot be separated reliably.
+- Ignore estimated, future and incomplete gas intervals. Persist learning for
+  delayed readings, accept corrected intervals, and require full calendar-day
+  coverage, including daylight-saving changes. No water meter is used.
+- Hold the current GBP/kWh rate constant and exclude standing charges. Missing
+  data or insufficient calibration leaves cost unavailable, never a partial total.
+
+After updating the integration, restart Home Assistant and select the optional
+gas sources in its configuration. Replace the dashboard JavaScript separately
+and use `/local/central-heating-controller-card.js?v=1.4.0`, then fully refresh.
+
+
 ## 1.3.1 — 2026-10-22
 
 - Skip dashboard renders when displayed entities and formatting preferences have

@@ -380,3 +380,13 @@ def test_measured_demand_anchor_expires_after_elapsed_time() -> None:
     aged = model.forecast(NOW + timedelta(minutes=15), 21.0, lambda _: 5.0, lambda _: 21.0, hours=1)
     assert immediate.points[0].demand == pytest.approx(0.13)
     assert aged.points[0].demand > immediate.points[0].demand
+
+
+def test_extended_cost_horizon_keeps_default_chart_at_24_hours():
+    model = ThermalForecaster()
+    normal = model.forecast(NOW, 20, lambda _: 8, lambda _: 16)
+    extended = model.forecast(NOW, 20, lambda _: 8, lambda _: 16, hours=49)
+    assert len(normal.points) == 289
+    assert extended.points[-1].at == NOW + timedelta(hours=49)
+    with pytest.raises(ValueError):
+        model.forecast(NOW, 20, lambda _: 8, lambda _: 16, hours=50)

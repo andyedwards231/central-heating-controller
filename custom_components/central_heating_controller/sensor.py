@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from math import isfinite
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -58,6 +59,8 @@ async def async_setup_entry(
             ControllerLearnedRateSensor(coordinator, entry.entry_id),
             ControllerPreheatStartSensor(coordinator, entry.entry_id),
             ControllerTemperatureForecastSensor(coordinator, entry.entry_id),
+            PredictedHeatingCostSensor(coordinator, entry.entry_id, "today"),
+            PredictedHeatingCostSensor(coordinator, entry.entry_id, "tomorrow"),
         )
     )
 
@@ -189,3 +192,40 @@ class ControllerTemperatureForecastSensor(ControllerEntity, SensorEntity):
             "forecast": [], "confidence": "learning",
             "reason": "Select a weather forecast and outdoor temperature sensor in integration options",
         }
+
+
+class PredictedHeatingCostSensor(ControllerEntity, SensorEntity):
+    """Publish a forecast heating cost in GBP when available."""
+
+    _unrecorded_attributes = frozenset({"reason", "calibration", "details"})
+
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str, period: str) -> None:
+        description = SensorEntityDescription(
+            key=f"predicted_heating_cost_{period}",
+            translation_key=f"predicted_heating_cost_{period}",
+            device_class=SensorDeviceClass.MONETARY,
+            suggested_display_precision=2,
+        )
+        super().__init__(coordinator, entry_id, description)
+        self._period = period
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.native_value is not None
+
+    @property
+    def native_value(self) -> float | None:
+        period_data = self.coordinator.data.heating_cost.get(self._period, {})
+        if not isinstance(period_data, dict):
+            return None
+        value = period_data.get("cost_gbp")
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) else None
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return "GBP"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        details = self.coordinator.data.heating_cost.get(self._period, {})
+        return dict(details) if isinstance(details, dict) else {}

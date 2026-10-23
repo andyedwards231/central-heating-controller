@@ -84,6 +84,7 @@ class PersistentState:
     learned_sample_count: int = 0
     thermal_model: dict = field(default_factory=dict)
     forecast_accuracy: dict = field(default_factory=dict)
+    heating_cost: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class ControllerState:
     temperature_capabilities: TemperatureCapabilities | None = None
     auto_mode: bool = True
     temperature_forecast: dict = field(default_factory=dict)
+    heating_cost: dict = field(default_factory=dict)
 
     @property
     def status(self) -> ControllerStatus:

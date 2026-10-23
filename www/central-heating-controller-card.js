@@ -471,13 +471,13 @@ class CentralHeatingControllerCard extends HTMLElement {
         const formats = this._dateFormatters();
         return `${formats.day.format(date)} ${formats.time.format(date)}`;
       };
-      const heatingBands = compact ? rows.slice(0, -1).map((point, index) => {
+      const heatingBands = rows.slice(0, -1).map((point, index) => {
         const next = rows[index + 1];
         // Demand describes the interval beginning at this point; do not bridge gaps.
         if (point.target === null || point.demand === null || point.demand <= 5 || point.demand > 100
             || next.time <= point.time || next.time - point.time > 10 * 60 * 1000) return "";
         return `<rect class="chc-heating-band" x="${x(point.time)}" y="${top}" width="${x(next.time) - x(point.time)}" height="${height-top-bottom}"/>`;
-      }).join("") : "";
+      }).join("");
       const first = formatAxisTime(tMin);
       const last = formatAxisTime(tMax);
       const timeTicks = [];
@@ -505,7 +505,7 @@ class CentralHeatingControllerCard extends HTMLElement {
           <desc id="chc-chart-desc">Predicted indoor temperature and target temperature, in ${this._escape(unit)}, from ${this._escape(first)} to ${this._escape(last)} local time.</desc>
           <g class="chc-chart-bands">${heatingBands}</g><g class="chc-chart-temperature-ticks">${ticks}</g><g class="chc-chart-time-ticks">${timeTicks.join("")}</g>
           <path d="${pathFor("temperature")}" class="chc-chart-line chc-chart-indoor"/><path d="${pathFor("target", true)}" class="chc-chart-line chc-chart-target"/>
-        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span>${compact ? '<span><i class="chc-legend-heating"></i>Heating expected</span>' : ""}</div>
+        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span><span><i class="chc-legend-heating"></i>Heating expected</span></div>
       </div>`;
     } else if (confidence === "learning") {
       content = `<div class="chc-forecast-state">${this._escape(reason || "Learning your home’s heating response. A forecast will appear when enough data is available.")}</div>`;
@@ -749,6 +749,8 @@ class CentralHeatingControllerCard extends HTMLElement {
       .chc-chart-vgrid { stroke-dasharray: 2 4; opacity: 0.65; }
       .chc-chart-line { fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
       .chc-chart-indoor { stroke: var(--primary-color, #03a9f4); }
+      .chc-heating-band { fill: #ed962a; opacity: .19; }
+      .chc-chart-legend .chc-legend-heating { width: 14px; height: 10px; border: 0; background: #ed962a; opacity: .5; border-radius: 2px; }
       .chc-chart-target { stroke: var(--warning-color, #e59b16); stroke-dasharray: 6 5; }
       .chc-chart-dot { fill: var(--primary-color, #03a9f4); }
       .chc-chart-legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--secondary-text-color, #667085); font-size: 11px; }

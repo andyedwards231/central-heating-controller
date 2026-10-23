@@ -53,6 +53,12 @@
       },
       "indoor_temperature_forecast": {
         "name": "Indoor temperature forecast"
+      },
+      "predicted_heating_cost_today": {
+        "name": "Predicted heating cost today"
+      },
+      "predicted_heating_cost_tomorrow": {
+        "name": "Predicted heating cost tomorrow"
       }
     }
   },
@@ -70,7 +76,10 @@
           "arrival_time_entity": "Arrival time (optional)",
           "weather_entity": "Weather forecast (optional, hourly forecasts required)",
           "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
-          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)"
+          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)",
+          "gas_rate_entity": "Gas unit rate (GBP/kWh, optional)",
+          "gas_consumption_entity": "Gas consumption today (kWh, optional)",
+          "gas_previous_consumption_entity": "Gas consumption from previous day (kWh, optional)"
         }
       },
       "settings": {
@@ -126,7 +135,10 @@
           "arrival_time_entity": "Arrival time (optional)",
           "weather_entity": "Weather forecast (optional, hourly forecasts required)",
           "outdoor_temperature_entity": "Outdoor temperature sensor (optional)",
-          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)"
+          "heating_activity_entity": "Heating activity or demand (optional, binary or % sensor)",
+          "gas_rate_entity": "Gas unit rate (GBP/kWh, optional)",
+          "gas_consumption_entity": "Gas consumption today (kWh, optional)",
+          "gas_previous_consumption_entity": "Gas consumption from previous day (kWh, optional)"
         }
       },
       "settings": {
