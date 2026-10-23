@@ -1,6 +1,7 @@
 """Tests for Central Heating Controller entities."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -624,6 +625,29 @@ async def test_default_entity_ids_match_documented_dashboard_entities(hass, cont
     ):
         for key in keys:
             assert _entity_id(hass, entry, platform, key) == f"{platform}.{DOMAIN}_{key}"
+
+
+async def test_cost_sensor_keeps_learning_diagnostics_visible_without_a_cost(hass, controller) -> None:
+    """An unknown estimate remains available so Home Assistant publishes diagnostics."""
+    entry, coordinator = controller
+    entity_id = _entity_id(hass, entry, "sensor", "predicted_heating_cost_today")
+    calibration = {
+        "reason": "insufficient_samples",
+        "sample_count": 0,
+        "observation_count": 12,
+        "first_observation": "2026-10-23T08:00:00+00:00",
+        "last_observation": "2026-10-23T09:00:00+00:00",
+    }
+    coordinator.async_set_updated_data(replace(coordinator.data, heating_cost={
+        "today": {"cost_gbp": None, "reason": "insufficient_samples", "calibration": calibration}
+    }))
+    await hass.async_block_till_done()
+
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.state == "unknown"
+    assert state.attributes["reason"] == "insufficient_samples"
+    assert state.attributes["calibration"] == calibration
 
 
 async def test_auto_switch_can_be_turned_off_while_thermostat_unavailable(

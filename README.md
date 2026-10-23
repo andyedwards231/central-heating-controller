@@ -365,8 +365,12 @@ forecast demand to midnight. Tomorrow covers its whole local calendar day. Both
 use the current unit rate, held constant, without a standing charge. Tomorrow
 requires weather coverage through the end of tomorrow. Missing demand history,
 missing forecast coverage, an invalid rate or insufficient learning leaves the
-sensor unavailable; the `reason` attribute explains why. Restart gaps longer
-than five minutes can leave today's total unavailable until the next full day.
+sensor value unknown; the `reason` and `calibration` attributes remain visible
+while the model is learning. Calibration diagnostics include the number and
+time span of retained heating-demand observations, even before any gas interval
+can be matched. The sensor itself is unavailable only when its coordinator is
+unavailable. Restart gaps longer than five minutes can leave today's value
+unknown until the next full day.
 
 Attributes expose the fitted coefficient, background gas allowance, sample
 counts, median absolute fit error, demand spread diagnostic, forecast confidence

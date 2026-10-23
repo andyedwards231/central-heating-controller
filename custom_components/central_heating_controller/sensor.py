@@ -211,7 +211,9 @@ class PredictedHeatingCostSensor(ControllerEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.native_value is not None
+        # Keep the entity available while the model is learning so HA publishes
+        # its reason and calibration attributes alongside an unknown value.
+        return super().available
 
     @property
     def native_value(self) -> float | None:

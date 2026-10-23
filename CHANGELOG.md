@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1 — 2026-10-23
+
+Keep heating-cost learning diagnostics visible before a price is available. Home Assistant now shows unknown with a reason and calibration attributes instead of hiding those attributes behind unavailable. Add observation count and first/last observation times so collection can be verified before the first complete gas interval. No change to heating control or stored learning.
+
+Restart Home Assistant after installing. The dashboard JavaScript is unchanged from v1.4.0; if not already copied, install the attached file separately in /config/www and refresh the dashboard.
+
+
 ## 1.4.0 — 2026-10-23
 
 - Shade expected heating periods on the main control and visual cards, retaining

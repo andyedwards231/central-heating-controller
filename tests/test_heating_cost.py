@@ -36,6 +36,21 @@ def test_mixed_boiler_fit_separates_baseline_from_demand_linked_heat() -> None:
     assert "may include hot water" in fit["assumption"]
 
 
+def test_calibration_reports_observations_before_any_gas_sample() -> None:
+    model = HeatingCostModel()
+    first = BASE
+    last = BASE + timedelta(hours=1)
+    model.observe(first, 0.0)
+    model.observe(first + timedelta(minutes=30), None)
+    model.observe(last, 0.5)
+
+    calibration = model.calibration()
+    assert calibration["sample_count"] == 0
+    assert calibration["observation_count"] == 3
+    assert calibration["first_observation"] == first.isoformat()
+    assert calibration["last_observation"] == last.isoformat()
+
+
 def test_requires_full_observation_coverage_and_historical_half_hour_interval() -> None:
     model = HeatingCostModel()
     start, end = BASE, BASE + timedelta(minutes=30)

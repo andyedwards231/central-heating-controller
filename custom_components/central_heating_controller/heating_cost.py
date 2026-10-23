@@ -218,6 +218,12 @@ class HeatingCostModel:
     def calibration(self) -> dict[str, float | int | str | None]:
         """Return fit diagnostics and the mixed-boiler attribution assumption."""
         result = dict(self._fit())
+        observations = sorted(self._observations)
+        result.update({
+            "observation_count": len(observations),
+            "first_observation": observations[0].isoformat() if observations else None,
+            "last_observation": observations[-1].isoformat() if observations else None,
+        })
         result["assumption"] = "Estimated heating attribution; baseline gas may include hot water and boiler losses."
         return result
 
