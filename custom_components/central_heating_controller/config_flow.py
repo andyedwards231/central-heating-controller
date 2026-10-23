@@ -242,7 +242,6 @@ def _normalize_entity_input(user_input: dict[str, Any]) -> dict[str, Any]:
             CONF_GAS_RATE, CONF_GAS_CONSUMPTION,
             CONF_GAS_PREVIOUS_CONSUMPTION,
         )
-        if field in user_input
     }
 
 

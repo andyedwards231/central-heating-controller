@@ -59,6 +59,9 @@ BASE_INPUT = {
     "weather_entity": None,
     "outdoor_temperature_entity": None,
     "heating_activity_entity": None,
+    CONF_GAS_RATE: None,
+    CONF_GAS_CONSUMPTION: None,
+    CONF_GAS_PREVIOUS_CONSUMPTION: None,
 }
 
 SETTINGS_INPUT = {
@@ -758,3 +761,12 @@ async def test_missing_optional_forecast_source_is_rejected(hass: HomeAssistant,
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {field: "entity_not_found"}
+
+
+def test_clearing_optional_gas_sources_overrides_original_entry_data():
+    from custom_components.central_heating_controller.config_flow import _normalize_entity_input
+    original = BASE_INPUT | {CONF_GAS_RATE: "sensor.gas_rate"}
+    submitted = {key: value for key, value in BASE_INPUT.items()
+                 if key not in (CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION)}
+    merged = original | _normalize_entity_input(submitted)
+    assert merged[CONF_GAS_RATE] is None
