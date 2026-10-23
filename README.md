@@ -377,3 +377,57 @@ counts, median absolute fit error, demand spread diagnostic, forecast confidence
 and tariff assumption. Fit errors describe the shared gas model, not independently
 verified heating-only cost accuracy. Temperature forecasts continue to have their
 separate checks against actual indoor temperatures.
+
+
+## Smart schedule preview and controller modes
+
+The smart schedule starts in **preview only**. It does not change the targets
+sent to your thermostat: the existing Home Assistant schedule remains in
+control. The main card shows a separate proposed 24-hour temperature curve and
+shades expected heating. Open **Schedule and night settings** to edit weekly
+comfort periods, night times, the night minimum and the maximum daytime drop.
+Your High temperature is the comfort target; periods mean **warm by** the start,
+with comfort maintained until the end. With no weekly periods set, preview uses
+your existing schedule helper. Night defaults to 23:00–07:00 and 16°C; the
+occupied daytime allowance defaults to 2°C. Comfort windows take precedence
+when they overlap the night window.
+
+The planner compares setbacks between comfort periods and earlier recovery
+starts, using the learned heating delay, demand response, heat loss, outdoor
+forecast and known arrival. Different gaps may use different drops, in 0.5°C
+steps up to your configured maximum. It minimises predicted heating demand
+across 36 hours when weather coverage permits (otherwise 24 hours), with an
+estimated allowance for reheating any remaining temperature deficit at the
+end. It uses a bounded search; neither exact optimum nor cash savings are
+guaranteed. A flat unit gas rate makes demand a useful cost proxy. Shared
+combi-boiler hot water and uncertain boiler efficiency limit monetary accuracy.
+The existing heating-cost sensors describe the **live** schedule, not the preview.
+
+The preview remains labelled while the model is learning, or if it predicts
+that comfort cannot be reached. Its assumed occupancy continues until any
+known home arrival; unknown future departures are not predicted. Actual
+forecast accuracy continues to be checked against reported temperatures for
+the live policy. A proposed schedule cannot be scored as though it had run.
+
+`select.central_heating_controller_controller_mode` offers these live modes:
+
+- **Auto:** normal control. Smart scheduling remains a preview in this release.
+- **Away:** holds the Eco temperature until a fresh homeward destination and
+  valid future ETA are seen, or any tracked person returns after a confirmed
+  absence. A person already home when Away is selected must leave and return;
+  unknown/unavailable tracking does not count as leaving. The latch survives
+  restarts. With no ETA entity configured, a fresh homeward destination uses
+  the existing immediate-preheat behaviour.
+- **Off:** turns the climate entity off and prevents automatic heating or heat
+  blasts. Presence and journey updates cannot re-enable it. Select Auto to resume.
+
+The preview plans recovery before a known arrival, even outside comfort
+windows, and holds comfort for the first hour after arrival. This proposal
+requires a usable ETA. The mode selector acts immediately, independently of
+preview. The legacy Auto switch remains compatible: on selects Auto, off
+selects Off.
+
+The `central_heating_controller.set_smart_schedule` action saves the complete
+preview settings against a controller entity. It is used by the card, so YAML
+editing is not necessary. Update the dashboard JavaScript separately from HACS;
+see [card installation](docs/lovelace-card.md).

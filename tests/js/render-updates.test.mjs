@@ -61,6 +61,21 @@ test("control mode notices attribute-only changes and relevant source appearance
   assert.equal(count(), 3);
 });
 
+test("control mode tracks the mode selector and smart plan preview entity", () => {
+  const { card, count } = trackedCard();
+  const hass = card.hass;
+  hass.states["select.central_heating_controller_controller_mode"] = { state: "away", attributes: {} };
+  card.hass = hass;
+  assert.equal(count(), 1);
+  assert.match(card.shadowRoot.innerHTML, /value="away" selected/);
+  hass.states["sensor.central_heating_controller_smart_heating_plan"] = {
+    state: "preview", attributes: { preview: true, forecast: [], explanation: "Plan updated" },
+  };
+  card.hass = hass;
+  assert.equal(count(), 2);
+  assert.match(card.shadowRoot.innerHTML, /Plan updated/);
+});
+
 test("configuration changes force rendering; equivalent metadata does not", () => {
   const { card, count } = trackedCard();
   card.setConfig({ entity: STATUS, title: "New title" });

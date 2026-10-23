@@ -2,7 +2,7 @@
 
 DOMAIN = "central_heating_controller"
 NAME = "Central Heating Controller"
-PLATFORMS = ("switch", "button", "number", "sensor")
+PLATFORMS = ("switch", "button", "number", "sensor", "select")
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.{{entry_id}}"
 
@@ -20,6 +20,12 @@ CONF_ECO_TEMP = "eco_temperature"
 CONF_FALLBACK_MINUTES = "fallback_warmup_minutes"
 CONF_MAX_WARMUP_MINUTES = "maximum_warmup_minutes"
 CONF_RESET_LEARNING = "reset_learning"
+CONF_SMART_SCHEDULE_ENABLED = "smart_schedule_enabled"
+CONF_SMART_COMFORT_SCHEDULE = "smart_comfort_schedule"
+CONF_SMART_NIGHT_START = "smart_night_start"
+CONF_SMART_NIGHT_END = "smart_night_end"
+CONF_SMART_NIGHT_TEMPERATURE = "smart_night_temperature"
+CONF_SMART_DAYTIME_DROP = "smart_daytime_drop"
 
 # Internal one-shot marker written by the options flow when the entry is unloaded.
 # The coordinator setup added in Task 6 consumes and removes this marker.
@@ -33,6 +39,14 @@ DEFAULT_LOW_F = 63.0
 DEFAULT_ECO_F = 57.0
 DEFAULT_FALLBACK_MINUTES = 60
 DEFAULT_MAX_WARMUP_MINUTES = 180
+DEFAULT_SMART_SCHEDULE_ENABLED = True
+DEFAULT_SMART_COMFORT_SCHEDULE = "{}"
+DEFAULT_SMART_NIGHT_START = "23:00"
+DEFAULT_SMART_NIGHT_END = "07:00"
+DEFAULT_SMART_NIGHT_TEMPERATURE_C = 16.0
+DEFAULT_SMART_NIGHT_TEMPERATURE_F = 61.0
+DEFAULT_SMART_DAYTIME_DROP_C = 2.0
+DEFAULT_SMART_DAYTIME_DROP_F = 3.6
 HEAT_BLAST_MINUTES = 60
 
 CONF_WEATHER = "weather_entity"

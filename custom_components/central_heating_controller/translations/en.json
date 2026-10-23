@@ -59,6 +59,19 @@
       },
       "predicted_heating_cost_tomorrow": {
         "name": "Predicted heating cost tomorrow"
+      },
+      "smart_heating_plan": {
+        "name": "Smart heating plan"
+      }
+    },
+    "select": {
+      "controller_mode": {
+        "name": "Controller mode",
+        "state": {
+          "auto": "Auto",
+          "away": "Away",
+          "off": "Off"
+        }
       }
     }
   },
@@ -84,7 +97,7 @@
       },
       "settings": {
         "title": "Configure heating",
-        "description": "Choose the temperatures and warm-up limits used by the controller.",
+        "description": "Choose the temperatures and warm-up limits used by the controller. Smart schedule settings provide a preview only. Comfort windows are day-by-day: each period must start before it ends and cannot cross midnight.",
         "data": {
           "active_hvac_mode": "Active HVAC mode",
           "high_temperature": "High temperature",
@@ -92,7 +105,14 @@
           "eco_temperature": "Eco temperature",
           "fallback_warmup_minutes": "Fallback warm-up duration",
           "maximum_warmup_minutes": "Maximum warm-up duration",
-          "destination_home_value": "Destination value meaning home (optional)"
+          "destination_home_value": "Destination value meaning home (optional)",
+          "smart_schedule_enabled": "Enable smart schedule preview (preview only)",
+          "smart_comfort_schedule": "Weekly comfort periods (JSON)",
+          "smart_night_start": "Night starts",
+          "smart_night_end": "Night ends",
+          "smart_night_temperature": "Night temperature",
+          "smart_daytime_drop": "Daytime temperature drop",
+          "reset_learning": "Reset heating and cooling learning"
         }
       }
     },
@@ -112,7 +132,12 @@
       "invalid_number": "Enter a finite number.",
       "invalid_duration": "Enter a duration from 5 to 360 minutes in 5-minute increments.",
       "warmup_order": "Fallback warm-up duration cannot exceed maximum warm-up duration.",
-      "already_configured": "This thermostat is already controlled by another Central Heating Controller entry."
+      "already_configured": "This thermostat is already controlled by another Central Heating Controller entry.",
+      "invalid_smart_schedule": "Choose whether to enable the smart schedule preview.",
+      "invalid_comfort_schedule": "Enter a weekly JSON object with valid, non-overlapping start and end times.",
+      "invalid_smart_time": "Enter a time in 24-hour HH:MM format.",
+      "smart_temperature_out_of_range": "Night temperature must be within thermostat limits and no higher than the high temperature.",
+      "invalid_daytime_drop": "Daytime drop must be between 0 and 5 °C (or the equivalent in °F)."
     }
   },
   "issues": {

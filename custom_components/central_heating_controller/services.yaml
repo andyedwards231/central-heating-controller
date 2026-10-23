@@ -1,0 +1,57 @@
+set_smart_schedule:
+  name: Set smart schedule
+  description: Update the smart heating schedule preview for a controller.
+  fields:
+    entity_id:
+      name: Controller entity
+      description: An entity belonging to the Central Heating Controller entry to update.
+      required: true
+      selector:
+        entity:
+          integration: central_heating_controller
+          multiple: true
+    enabled:
+      name: Enabled
+      description: Enable or disable smart schedule preview planning.
+      required: true
+      selector:
+        boolean:
+    weekly_schedule:
+      name: Weekly schedule
+      description: Map weekday names to lists of same-day periods; each start must be before its end.
+      required: true
+      example: '{"monday":[{"start":"06:30","end":"08:00"}]}'
+      selector:
+        object:
+    night_start:
+      name: Night starts
+      required: true
+      example: "23:00"
+      description: Local time in HH:MM format.
+      selector:
+        text:
+    night_end:
+      name: Night ends
+      required: true
+      example: "07:00"
+      description: Local time in HH:MM format.
+      selector:
+        text:
+    night_temperature:
+      name: Night temperature
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: any
+          mode: box
+    daytime_drop:
+      name: Daytime temperature drop
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 9
+          step: any
+          mode: box

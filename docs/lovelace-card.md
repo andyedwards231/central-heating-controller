@@ -27,6 +27,29 @@ entity: sensor.central_heating_controller_status
 mode: control
 ```
 
+The control card includes a **Mode** selector for `auto`, `away`, and `off`.
+It uses `select.<base>_controller_mode` and calls Home Assistant's
+`select.select_option` service; the existing auto-mode switch action remains
+available for compatibility. The collapsible **Schedule and night settings**
+editor lets you show or hide the smart schedule preview, add or remove any
+number of comfort periods for each day, and edit the night window and
+temperatures. Comfort windows are warm-by times; they do not turn the heating
+on at the start time. The High setpoint is the comfort temperature. If the
+weekly schedule has no windows, the existing Home Assistant schedule is used.
+The editor saves the full weekly schedule through the integration service. The Configure link remains
+available for the rest of the integration options.
+
+When `sensor.<base>_smart_heating_plan` has state `preview`, the card shows a
+separate panel headed **Preview only** and marked as unable to control heating.
+Its explanation and optional forecast use the sensor's `forecast` attribute
+with the same point fields as the indoor forecast (`datetime`, `temperature`,
+`target_temperature`, and `heating_demand_percent`). The panel is omitted for
+`disabled` or `unavailable` states. The live forecast remains separate above
+the preview.
+
+Override renamed entities with `controller_mode` and `smart_heating_plan` under
+`entities`.
+
 ## Visual Status Card
 
 ```yaml
@@ -88,7 +111,7 @@ entities:
 A separate, read-only card with large current and target temperatures, a 24-hour
 forecast line, a dashed target line, and amber shading where heating is expected.
 It uses the same JavaScript resource as the other cards. Copy the updated file
-from the v1.4.0 release into `/config/www/central-heating-controller-card.js`,
+from the v1.5.0 release into `/config/www/central-heating-controller-card.js`,
 update the resource URL above, and refresh the browser.
 
 ```yaml

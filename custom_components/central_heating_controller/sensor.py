@@ -59,6 +59,7 @@ async def async_setup_entry(
             ControllerLearnedRateSensor(coordinator, entry.entry_id),
             ControllerPreheatStartSensor(coordinator, entry.entry_id),
             ControllerTemperatureForecastSensor(coordinator, entry.entry_id),
+            SmartHeatingPlanSensor(coordinator, entry.entry_id),
             PredictedHeatingCostSensor(coordinator, entry.entry_id, "today"),
             PredictedHeatingCostSensor(coordinator, entry.entry_id, "tomorrow"),
         )
@@ -231,3 +232,22 @@ class PredictedHeatingCostSensor(ControllerEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         details = self.coordinator.data.heating_cost.get(self._period, {})
         return dict(details) if isinstance(details, dict) else {}
+
+
+class SmartHeatingPlanSensor(ControllerEntity, SensorEntity):
+    """Expose a separate proposal without changing live thermostat control."""
+
+    _unrecorded_attributes = frozenset({"forecast", "settings", "gap_drops"})
+
+    def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id, SensorEntityDescription(
+            key="smart_heating_plan", translation_key="smart_heating_plan",
+        ))
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.data.smart_plan.get("state", "unavailable")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.data.smart_plan or {"settings": self.coordinator.smart_settings(), "preview": True, "forecast": []}

@@ -77,6 +77,9 @@ class PersistentState:
     """
 
     auto_mode: bool = True
+    forced_away: bool = False
+    away_seen_absent: list[str] = field(default_factory=list)
+    away_selected_at: datetime | None = None
     blast_until: datetime | None = None
     manual_override_target: float | None = None
     manual_override_fingerprint: tuple[JsonPrimitive, ...] | None = None
@@ -116,6 +119,7 @@ class ControllerState:
     auto_mode: bool = True
     temperature_forecast: dict = field(default_factory=dict)
     heating_cost: dict = field(default_factory=dict)
+    smart_plan: dict = field(default_factory=dict)
 
     @property
     def status(self) -> ControllerStatus:

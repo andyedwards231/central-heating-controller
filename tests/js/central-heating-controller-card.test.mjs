@@ -75,6 +75,129 @@ test("control mode renders primary actions and setpoint controls", () => {
   assert.match(card.shadowRoot.innerHTML, /High/);
   assert.match(card.shadowRoot.innerHTML, /Low/);
   assert.match(card.shadowRoot.innerHTML, /Eco/);
+  assert.match(card.shadowRoot.innerHTML, /Mode/);
+  assert.match(card.shadowRoot.innerHTML, /Configure schedule and integration settings/);
+});
+
+test("renders the smart plan as a clearly labelled preview with its own forecast", () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "select.central_heating_controller_controller_mode": { state: "away", attributes: {} },
+    "sensor.central_heating_controller_smart_heating_plan": {
+      entity_id: "sensor.central_heating_controller_smart_heating_plan",
+      state: "preview",
+      attributes: {
+        explanation: "Heating would start at 17:30.", temperature_unit: "°C", preview: true,
+        forecast: [{ datetime: "2026-06-29T12:00:00+01:00", temperature: 18, target_temperature: 19, heating_demand_percent: 30 }],
+      },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+
+  assert.match(card.shadowRoot.innerHTML, /value="away" selected/);
+  assert.match(card.shadowRoot.innerHTML, /Preview only/);
+  assert.match(card.shadowRoot.innerHTML, /Does not control heating/);
+  assert.match(card.shadowRoot.innerHTML, /Heating would start at 17:30/);
+  assert.match(card.shadowRoot.innerHTML, /chc-chart-indoor/);
+});
+
+test("shows the smart plan explanation when preview is unavailable", () => {
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = createHass({ states: {
+    "sensor.central_heating_controller_smart_heating_plan": {
+      state: "unavailable", attributes: { explanation: "Weather data is missing." },
+    },
+  } });
+
+  assert.match(card.shadowRoot.innerHTML, /Preview unavailable/);
+  assert.match(card.shadowRoot.innerHTML, /Weather data is missing/);
+  const unavailablePanel = card.shadowRoot.innerHTML.match(
+    /aria-label="Smart heating preview unavailable">([\s\S]*?)<\/section>/,
+  )?.[1] || "";
+  assert.doesNotMatch(unavailablePanel, /chc-chart-indoor/);
+});
+
+test("controller mode selection calls select.select_option", async () => {
+  const card = new Card();
+  const hass = createHass();
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+
+  await card._selectControllerMode("away");
+
+  assert.deepEqual(hass.calls.at(-1), {
+    domain: "select",
+    service: "select_option",
+    data: {
+      entity_id: "select.central_heating_controller_controller_mode",
+      option: "away",
+    },
+  });
+});
+
+test("schedule editor loads multiple periods, preserves drafts, and saves the full schedule", async () => {
+  const card = new Card();
+  const hass = createHass({ states: {
+    "sensor.central_heating_controller_smart_heating_plan": {
+      state: "disabled",
+      attributes: { settings: {
+        enabled: true,
+        weekly_schedule: { monday: [
+          { start: "06:30", end: "08:00" },
+          { start: "12:00", end: "13:00" },
+          { start: "17:00", end: "22:00" },
+        ] },
+        night_start: "23:00", night_end: "06:00", night_temperature: 16.5, daytime_drop: 1,
+      } },
+    },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+
+  assert.equal(card._scheduleDraft.weekly_schedule.monday.length, 3);
+  assert.match(card.shadowRoot.innerHTML, /Schedule and night settings/);
+  assert.match(card.shadowRoot.innerHTML, /Show schedule preview/);
+  assert.match(card.shadowRoot.innerHTML, /warm by these times/);
+  card._setScheduleEditorOpen(true);
+  card._updateScheduleDraft("weekly_schedule.monday.1.start", "12:30");
+  hass.states["sensor.central_heating_controller_smart_heating_plan"] = {
+    state: "disabled", attributes: { settings: { weekly_schedule: {} } },
+  };
+  card.hass = hass;
+  assert.equal(card._scheduleDraft.weekly_schedule.monday[1].start, "12:30");
+  assert.match(card.shadowRoot.innerHTML, /class="chc-schedule-editor" open/);
+
+  await card._saveSchedule();
+  assert.deepEqual(hass.calls.at(-1), {
+    domain: "central_heating_controller",
+    service: "set_smart_schedule",
+    data: {
+      entity_id: "sensor.central_heating_controller_status",
+      enabled: true,
+      weekly_schedule: {
+        monday: [
+          { start: "06:30", end: "08:00" },
+          { start: "12:30", end: "13:00" },
+          { start: "17:00", end: "22:00" },
+        ],
+        tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [],
+      },
+      night_start: "23:00", night_end: "06:00", night_temperature: 16.5, daytime_drop: 1,
+    },
+  });
+  assert.match(card.shadowRoot.innerHTML, /Schedule saved/);
+  assert.equal(card._scheduleDraftDirty, false);
+  assert.match(card.shadowRoot.innerHTML, /class="chc-schedule-editor" open/);
+});
+
+test("schedule editor uses the requested night defaults", () => {
+  const card = new Card();
+  const draft = card._initialScheduleDraft();
+  assert.equal(draft.night_start, "23:00");
+  assert.equal(draft.night_end, "07:00");
+  assert.equal(draft.daytime_drop, 2);
 });
 
 test("turns auto mode on when the auto switch is off", async () => {

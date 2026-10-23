@@ -289,3 +289,44 @@ async def test_accuracy_history_restores_only_for_matching_learning_sources(hass
     await same.async_reset_learning()
     assert same.forecast_accuracy.metrics()["1h"]["count"] == 0
     assert same.persistent_state.forecast_accuracy["scores"]["1h"] == []
+
+
+async def test_smart_preview_is_separate_and_failure_does_not_control(hass, service_call_mock):
+    """Preview computation cannot issue thermostat commands, even on failure."""
+    from unittest.mock import patch
+    _set_baseline_states(hass)
+    _set_forecast_states(hass)
+    coordinator, _ = await _setup_coordinator(hass, data=_forecast_config())
+    await _forecast(coordinator, schedule_high=lambda at: 7 <= at.hour < 9 or 18 <= at.hour < 22)
+    service_call_mock.reset_mock()
+    preview = await coordinator._async_smart_preview(NOW, coordinator.data, True, False)
+    assert preview['state'] == 'preview'
+    assert len(preview['forecast']) == 289
+    assert preview['settings']['night_temperature'] == 16
+    assert preview['settings']['daytime_drop'] == 2
+    assert preview['provisional'] is True
+    service_call_mock.assert_not_awaited()
+    coordinator._preview_cache = None
+    with patch('custom_components.central_heating_controller.coordinator.plan_smart_schedule', side_effect=ValueError('bad weather')):
+        failed = await coordinator._async_smart_preview(NOW, coordinator.data, True, False)
+    assert failed['state'] == 'unavailable'
+    assert failed['settings'] == preview['settings']
+    service_call_mock.assert_not_awaited()
+
+
+async def test_smart_schedule_updates_preserve_sources_and_validate_atomically(hass):
+    from custom_components.central_heating_controller.const import CONF_SMART_NIGHT_START
+    from homeassistant.exceptions import HomeAssistantError
+    _set_baseline_states(hass)
+    _set_forecast_states(hass)
+    coordinator, entry = await _setup_coordinator(hass, data=_forecast_config())
+    payload = coordinator.smart_settings() | {'night_start': '22:30', 'weekly_schedule': {'monday': [{'start': '07:00', 'end': '09:00'}]}}
+    await coordinator.async_update_smart_schedule(payload)
+    assert entry.options[CONF_SMART_NIGHT_START] == '22:30'
+    assert coordinator.config[CONF_WEATHER] == 'weather.home'
+    previous = dict(entry.options)
+    with pytest.raises(HomeAssistantError):
+        await coordinator.async_update_smart_schedule(payload | {'daytime_drop': float('nan')})
+    assert dict(entry.options) == previous
+    await coordinator.async_update_setting('high_temperature', 21)
+    assert entry.options[CONF_SMART_NIGHT_START] == '22:30'

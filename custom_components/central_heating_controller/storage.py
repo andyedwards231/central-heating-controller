@@ -126,6 +126,10 @@ class ControllerStore:
 
         return PersistentState(
             auto_mode=auto_mode if isinstance(auto_mode, bool) else True,
+            forced_away=raw.get("forced_away") is True,
+            away_seen_absent=[v for v in raw.get("away_seen_absent", []) if isinstance(v, str)]
+                if isinstance(raw.get("away_seen_absent"), list) else [],
+            away_selected_at=_utc_datetime(raw.get("away_selected_at")),
             blast_until=blast_until,
             manual_override_target=manual_target,
             manual_override_fingerprint=fingerprint,
@@ -141,6 +145,9 @@ class ControllerStore:
         await self._store.async_save(
             {
                 "auto_mode": state.auto_mode,
+                "forced_away": state.forced_away,
+                "away_seen_absent": state.away_seen_absent,
+                "away_selected_at": state.away_selected_at.isoformat() if state.away_selected_at else None,
                 "blast_until": (
                     state.blast_until.astimezone(timezone.utc).isoformat()
                     if state.blast_until is not None

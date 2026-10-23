@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Heating schedule preview</title><style>body{max-width:640px;margin:24px auto;padding:0 16px;background:#f5f6f8;font:16px system-ui;--primary-text-color:#20252b;--secondary-text-color:#637080;--card-background-color:white}ha-card{display:block;background:white;border-radius:16px}</style><body><p>Synthetic temperatures. No connection to Home Assistant.</p><div id="card"></div><script type="module">
+import '../../www/central-heating-controller-card.js';
+import {createHass} from '../js/fixtures.mjs';
+const start=Date.now();
+const forecast=Array.from({length:289},(_,i)=>({datetime:new Date(start+i*300000).toISOString(),temperature:19+Math.sin(i/30),target_temperature:i<80||i>220?20:18,heating_demand_percent:i<35||i>200&&i<245?65:0}));
+const card=document.createElement('central-heating-controller-card');card.setConfig({entity:'sensor.central_heating_controller_status'});
+card.hass=createHass({states:{
+ 'select.central_heating_controller_controller_mode':{state:'auto',attributes:{options:['auto','away','off']}},
+ 'sensor.central_heating_controller_indoor_temperature_forecast':{state:'20',attributes:{forecast,temperature_unit:'°C',confidence:'learning'}},
+ 'sensor.central_heating_controller_smart_heating_plan':{state:'preview',attributes:{preview:true,forecast,temperature_unit:'°C',explanation:'Preview only — your current heating schedule remains in control. Still learning how your house heats and cools.',settings:{enabled:true,weekly_schedule:{monday:[{start:'07:00',end:'09:00'},{start:'17:00',end:'22:00'}]},night_start:'23:00',night_end:'07:00',night_temperature:16,daytime_drop:2}}}
+}});document.querySelector('#card').append(card);
+</script></body></html>

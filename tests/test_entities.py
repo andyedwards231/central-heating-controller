@@ -48,6 +48,7 @@ from custom_components.central_heating_controller.models import ControllerStatus
 
 ENTITY_KEYS = (
     "auto_mode",
+    "controller_mode",
     "heat_blast",
     "high_temperature",
     "low_temperature",
@@ -216,6 +217,7 @@ async def test_entities_share_one_service_device_and_stable_unique_ids(hass, con
         entity_registry.async_get_entity_id(platform, DOMAIN, f"{entry.entry_id}_{key}")
         for platform, key in (
             ("switch", "auto_mode"),
+            ("select", "controller_mode"),
             ("button", "heat_blast"),
             ("number", "high_temperature"),
             ("number", "low_temperature"),
@@ -247,7 +249,9 @@ async def test_entity_states_availability_classes_units_and_attributes(hass, con
     entry, _coordinator = controller
 
     assert hass.states.get(_entity_id(hass, entry, "switch", "auto_mode")).state == "on"
+    assert hass.states.get(_entity_id(hass, entry, "select", "controller_mode")).state == "auto"
     assert hass.states.get(_entity_id(hass, entry, "button", "heat_blast")).state != "unavailable"
+
 
     expected_numbers = {
         "high_temperature": ("20.0", UnitOfTemperature.CELSIUS, 7.0, 35.0, 0.5),
@@ -296,6 +300,54 @@ async def test_entity_states_availability_classes_units_and_attributes(hass, con
         hass.states.get(_entity_id(hass, entry, "sensor", "preheat_start_time")).state
         == "unavailable"
     )
+
+
+async def test_controller_mode_select_and_smart_schedule_service(hass, controller) -> None:
+    """Mode selection and the schedule service reach the owning coordinator."""
+    entry, coordinator = controller
+    mode_entity = _entity_id(hass, entry, "select", "controller_mode")
+    set_mode = AsyncMock()
+    coordinator.async_set_controller_mode = set_mode
+    await hass.services.async_call("select", "select_option", {
+        "entity_id": mode_entity, "option": "away"
+    }, blocking=True)
+    set_mode.assert_awaited_once_with("away")
+
+    update = AsyncMock()
+    coordinator.async_update_smart_schedule = update
+    payload = {
+        "enabled": True,
+        "weekly_schedule": {"monday": [{"start": "06:30", "end": "08:00"}]},
+        "night_start": "23:00",
+        "night_end": "07:00",
+        "night_temperature": 16.0,
+        "daytime_drop": 2.0,
+    }
+    await hass.services.async_call(
+        DOMAIN,
+        "set_smart_schedule",
+        {"entity_id": mode_entity, **payload},
+        blocking=True,
+    )
+    update.assert_awaited_once_with(payload)
+
+    with pytest.raises(HomeAssistantError, match="entity_id must identify"):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_smart_schedule",
+            {"entity_id": "sensor.not_a_controller", **payload},
+            blocking=True,
+        )
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    with pytest.raises(HomeAssistantError, match="not loaded"):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_smart_schedule",
+            {"entity_id": mode_entity, **payload},
+            blocking=True,
+        )
+
 
 
 async def test_temperature_numbers_allow_thermostat_to_omit_target_step(
@@ -610,7 +662,7 @@ def test_entity_translations_are_complete_and_aligned() -> None:
     )
 
     assert strings["entity"] == english["entity"]
-    assert set(strings["entity"]) == {"switch", "button", "number", "sensor"}
+    assert set(strings["entity"]) == {"switch", "button", "number", "sensor", "select"}
     assert set(strings["entity"]["sensor"]["status"]["state"]) == {
         item.value for item in ControllerStatus
     }

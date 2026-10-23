@@ -152,6 +152,7 @@ async def test_storage_round_trip_serializes_only_persistent_fields(hass) -> Non
     await store.async_save(state)
 
     assert save.await_args.args[0] == {
+        "forced_away": False, "away_seen_absent": [], "away_selected_at": None,
         "auto_mode": False,
         "blast_until": "2026-06-28T17:00:00+00:00",
         "manual_override_target": 18.5,

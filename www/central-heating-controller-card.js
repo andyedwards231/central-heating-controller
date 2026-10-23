@@ -1,7 +1,9 @@
 const CARD_NAME = "central-heating-controller-card";
+const EMPTY_SETTINGS = Object.freeze({});
 
 const ENTITY_SUFFIXES = {
   autoMode: ["switch", "auto_mode", "auto_mode"],
+  controllerMode: ["select", "controller_mode", "controller_mode"],
   heatBlast: ["button", "heat_blast", "heat_blast"],
   highTemperature: ["number", "high_temperature", "high_temperature"],
   lowTemperature: ["number", "low_temperature", "low_temperature"],
@@ -12,6 +14,7 @@ const ENTITY_SUFFIXES = {
   learnedRate: ["sensor", "learned_heating_rate", "learned_heating_rate"],
   preheatStart: ["sensor", "preheat_start_time", "preheat_start_time"],
   indoorTemperatureForecast: ["sensor", "indoor_temperature_forecast", "indoor_temperature_forecast"],
+  smartHeatingPlan: ["sensor", "smart_heating_plan", "smart_heating_plan"],
 };
 
 // Existing entity registries retain names created by releases before 1.1.0.
@@ -39,6 +42,11 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._config = null;
     this._entities = {};
     this._hass = null;
+    this._scheduleDraft = null;
+    this._scheduleDraftDirty = false;
+    this._scheduleSettingsSource = null;
+    this._scheduleEditorOpen = false;
+    this._scheduleMessage = "";
   }
 
   setConfig(config) {
@@ -188,6 +196,131 @@ class CentralHeatingControllerCard extends HTMLElement {
     await this._callService("switch", service, { entity_id: entityId });
   }
 
+  async _selectControllerMode(mode) {
+    if (!["auto", "away", "off"].includes(mode)) return;
+    await this._callService("select", "select_option", {
+      entity_id: this._entities.controllerMode,
+      option: mode,
+    });
+  }
+
+  _initialScheduleDraft(settings = {}) {
+    const days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    const weekly = settings.weekly_schedule && typeof settings.weekly_schedule === "object"
+      ? settings.weekly_schedule : {};
+    return {
+      enabled: settings.enabled === true,
+      weekly_schedule: Object.fromEntries(days.map(day => [day,
+        Array.isArray(weekly[day]) ? weekly[day].map(period => ({
+          start: String(period?.start || ""), end: String(period?.end || ""),
+        })) : [],
+      ])),
+      night_start: String(settings.night_start || "23:00"),
+      night_end: String(settings.night_end || "07:00"),
+      night_temperature: settings.night_temperature ?? 16,
+      daytime_drop: settings.daytime_drop ?? 2,
+    };
+  }
+
+  _renderScheduleEditor(settings = EMPTY_SETTINGS) {
+    settings ||= EMPTY_SETTINGS;
+    if (!this._scheduleDraft || (!this._scheduleDraftDirty && settings !== this._scheduleSettingsSource)) {
+      this._scheduleDraft = this._initialScheduleDraft(settings);
+      this._scheduleSettingsSource = settings;
+    }
+    const draft = this._scheduleDraft;
+    const dayNames = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    const rows = dayNames.map(day => `
+      <fieldset class="chc-schedule-day"><legend>${this._titleCase(day)}</legend>
+        ${(draft.weekly_schedule[day] || []).map((period, index) => `
+          <div class="chc-period">
+            <label>From<input type="time" data-draft-path="weekly_schedule.${day}.${index}.start" value="${this._escape(period.start)}"></label>
+            <label>To<input type="time" data-draft-path="weekly_schedule.${day}.${index}.end" value="${this._escape(period.end)}"></label>
+            <button type="button" class="chc-remove" data-action="period-remove:${day}:${index}" aria-label="Remove ${this._titleCase(day)} period">Remove</button>
+          </div>`).join("")}
+        <button type="button" class="chc-add" data-action="period-add:${day}">Add time period</button>
+      </fieldset>`).join("");
+    return `<details class="chc-schedule-editor" ${this._scheduleEditorOpen ? "open" : ""}><summary>Schedule and night settings</summary>
+      <form data-schedule-form>
+        <label class="chc-enable"><input type="checkbox" data-draft-path="enabled" ${draft.enabled ? "checked" : ""}> Show schedule preview</label>
+        <p class="chc-schedule-hint">Comfort windows mean the home should be warm by these times; they do not switch heating on then. The High setpoint above is the comfort temperature. If no weekly windows are set, the existing Home Assistant schedule is used. Period end times are exclusive.</p>
+        ${rows}
+        <fieldset class="chc-schedule-day"><legend>Night settings</legend>
+          <div class="chc-period">
+            <label>Night starts<input type="time" data-draft-path="night_start" value="${this._escape(draft.night_start)}"></label>
+            <label>Night ends<input type="time" data-draft-path="night_end" value="${this._escape(draft.night_end)}"></label>
+          </div>
+          <div class="chc-period">
+            <label>Night temperature<input type="number" step="0.1" data-draft-path="night_temperature" value="${this._escape(draft.night_temperature)}"></label>
+            <label>Maximum daytime drop<input type="number" step="0.1" min="0" data-draft-path="daytime_drop" value="${this._escape(draft.daytime_drop)}"></label>
+          </div>
+        </fieldset>
+        <div class="chc-schedule-footer"><button type="submit">Save schedule</button><span role="status">${this._escape(this._scheduleMessage)}</span></div>
+      </form>
+    </details>`;
+  }
+
+  _updateScheduleDraft(path, value) {
+    if (!this._scheduleDraft || !path) return;
+    const parts = path.split(".");
+    let target = this._scheduleDraft;
+    for (const part of parts.slice(0, -1)) target = target?.[part];
+    const key = parts.at(-1);
+    if (!target || !(key in target)) return;
+    target[key] = typeof value === "boolean" ? value : value;
+    this._scheduleDraftDirty = true;
+  }
+
+  async _saveSchedule() {
+    const draft = this._scheduleDraft;
+    if (!draft) return;
+    const toMinutes = value => {
+      const match = /^(\d{2}):(\d{2})$/.exec(String(value));
+      return match && Number(match[1]) < 24 && Number(match[2]) < 60;
+    };
+    if (!toMinutes(draft.night_start) || !toMinutes(draft.night_end)
+        || !Number.isFinite(Number(draft.night_temperature)) || !Number.isFinite(Number(draft.daytime_drop))
+        || Number(draft.daytime_drop) < 0
+        || Object.values(draft.weekly_schedule).some(periods => periods.some(period =>
+          !toMinutes(period.start) || !toMinutes(period.end)))) {
+      this._scheduleMessage = "Check the times and temperature values before saving.";
+      this._render();
+      return;
+    }
+    const data = {
+      entity_id: this._config.entity,
+      enabled: draft.enabled,
+      weekly_schedule: draft.weekly_schedule,
+      night_start: draft.night_start,
+      night_end: draft.night_end,
+      night_temperature: Number(draft.night_temperature),
+      daytime_drop: Number(draft.daytime_drop),
+    };
+    try {
+      await this._callService("central_heating_controller", "set_smart_schedule", data);
+      this._scheduleMessage = "Schedule saved.";
+      this._scheduleDraftDirty = false;
+    } catch (_error) {
+      this._scheduleMessage = "Could not save the schedule. Check the integration and try again.";
+    }
+    this._render();
+  }
+
+  _setScheduleEditorOpen(open) {
+    this._scheduleEditorOpen = Boolean(open);
+  }
+
+  _changeSchedulePeriods(action) {
+    if (!this._scheduleDraft) return;
+    const [, operation, day, indexText] = /^(period-(?:add|remove)):([^:]+)(?::(\d+))?$/.exec(action) || [];
+    if (!operation || !this._scheduleDraft.weekly_schedule[day]) return;
+    const periods = this._scheduleDraft.weekly_schedule[day];
+    if (operation === "period-add") periods.push({ start: "09:00", end: "17:00" });
+    else periods.splice(Number(indexText), 1);
+    this._scheduleDraftDirty = true;
+    this._render();
+  }
+
   async _pressHeatBlast() {
     await this._callService("button", "press", { entity_id: this._entities.heatBlast });
   }
@@ -286,6 +419,22 @@ class CentralHeatingControllerCard extends HTMLElement {
     const manual = attributes.manual_override ? `
       <div class="chc-alert">Manual override is active</div>
     ` : "";
+    const selectedMode = this._state(this._entities.controllerMode)?.state || "auto";
+    const previewState = this._state(this._entities.smartHeatingPlan);
+    const preview = previewState?.state === "preview" && previewState.attributes?.preview === true ? `
+      <section class="chc-preview" aria-label="Smart heating preview">
+        <div class="chc-preview-heading"><strong>Preview only</strong><span>Does not control heating</span></div>
+        ${previewState.attributes?.explanation ? `<div class="chc-forecast-note">${this._escape(previewState.attributes.explanation)}</div>` : ""}
+        ${this._renderForecast(false, this._entities.smartHeatingPlan)}
+      </section>
+    ` : "";
+    const previewUnavailable = ["unavailable", "unknown"].includes(previewState?.state) ? `
+      <section class="chc-preview" aria-label="Smart heating preview unavailable">
+        <div class="chc-preview-heading"><strong>Preview unavailable</strong><span>Preview only</span></div>
+        <div class="chc-forecast-note">${this._escape(previewState.attributes?.explanation || "The smart heating preview is currently unavailable.")}</div>
+      </section>
+    ` : "";
+    const scheduleEditor = this._renderScheduleEditor(previewState?.attributes?.settings || EMPTY_SETTINGS);
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
@@ -307,6 +456,9 @@ class CentralHeatingControllerCard extends HTMLElement {
             <div class="chc-current">${this._escape(current)}</div>
           </div>
         </div>
+        <label class="chc-mode"><span class="chc-label">Mode</span><select data-mode aria-label="Mode">
+          ${["auto", "away", "off"].map(mode => `<option value="${mode}" ${selectedMode === mode ? "selected" : ""}>${this._titleCase(mode)}</option>`).join("")}
+        </select></label>
         <div class="chc-actions">
           <button type="button" data-action="auto">${this._autoModeLabel()}</button>
           <button type="button" data-action="blast" class="chc-hot">Heat Blast</button>
@@ -317,6 +469,10 @@ class CentralHeatingControllerCard extends HTMLElement {
           ${this._renderNumberControl("Eco", this._entities.ecoTemperature)}
         </div>
         ${this._renderForecast()}
+        ${preview}
+        ${previewUnavailable}
+        ${scheduleEditor}
+        <a class="chc-configure" href="/config/integrations/integration/central_heating_controller">Configure schedule and integration settings</a>
         ${reason}
         ${manual}
       </ha-card>
@@ -409,18 +565,20 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._bindActions();
   }
 
-  _renderForecast(compact = false) {
-    const state = this._state(this._entities.indoorTemperatureForecast);
+  _renderForecast(compact = false, entityId = this._entities.indoorTemperatureForecast) {
+    const state = this._state(entityId);
     const key = this._dateFormatters().key;
-    if (this._forecastCache?.state === state && this._forecastCache.compact === compact
-        && this._forecastCache.formatKey === key) return this._forecastCache.markup;
-    const markup = this._buildForecast(compact);
-    this._forecastCache = { state, compact, formatKey: key, markup };
+    this._forecastCache ||= new Map();
+    const cacheKey = `${entityId}:${compact}`;
+    const cached = this._forecastCache.get(cacheKey);
+    if (cached?.state === state && cached.formatKey === key) return cached.markup;
+    const markup = this._buildForecast(compact, entityId);
+    this._forecastCache.set(cacheKey, { state, formatKey: key, markup });
     return markup;
   }
 
-  _buildForecast(compact = false) {
-    const state = this._state(this._entities.indoorTemperatureForecast);
+  _buildForecast(compact = false, entityId = this._entities.indoorTemperatureForecast) {
+    const state = this._state(entityId);
     const attrs = state?.attributes || {};
     const rows = Array.isArray(attrs.forecast) ? attrs.forecast
       .filter((point) => point && typeof point === "object")
@@ -617,6 +775,8 @@ class CentralHeatingControllerCard extends HTMLElement {
           this._toggleAutoMode();
         } else if (action === "blast") {
           this._pressHeatBlast();
+        } else if (action?.startsWith("period-")) {
+          this._changeSchedulePeriods(action);
         } else if (action?.startsWith("increment:")) {
           this._adjustNumber(action.slice("increment:".length), 1);
         } else if (action?.startsWith("decrement:")) {
@@ -624,6 +784,20 @@ class CentralHeatingControllerCard extends HTMLElement {
         }
       });
     }
+    const mode = this.shadowRoot.querySelector("[data-mode]");
+    if (mode) mode.addEventListener("change", (event) => this._selectControllerMode(event.target.value));
+    for (const input of this.shadowRoot.querySelectorAll("[data-draft-path]")) {
+      const update = event => this._updateScheduleDraft(input.dataset.draftPath,
+        input.type === "checkbox" ? event.target.checked : event.target.value);
+      input.addEventListener(input.type === "checkbox" ? "change" : "input", update);
+    }
+    const form = this.shadowRoot.querySelector("[data-schedule-form]");
+    if (form) form.addEventListener("submit", event => {
+      event.preventDefault();
+      this._saveSchedule();
+    });
+    const details = this.shadowRoot.querySelector(".chc-schedule-editor");
+    if (details) details.addEventListener("toggle", event => this._setScheduleEditorOpen(event.target.open));
   }
 
   _styles() {
@@ -666,6 +840,26 @@ class CentralHeatingControllerCard extends HTMLElement {
         gap: 14px;
         padding: 18px;
       }
+      .chc-mode { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 0 18px 14px; }
+      .chc-mode select { width: 100%; min-height: 40px; padding: 7px 10px; border: 1px solid var(--divider-color, #aaa); border-radius: 8px; color: inherit; background: var(--card-background-color, #fff); font: inherit; }
+      .chc-preview { margin: 0 18px 18px; padding: 12px; border: 1px solid var(--warning-color, #e59b16); border-radius: 9px; background: color-mix(in srgb, var(--warning-color, #e59b16) 7%, transparent); }
+      .chc-preview .chc-forecast { padding: 10px 0 0; }
+      .chc-preview-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 12px; color: var(--warning-color, #9a6700); }
+      .chc-configure { display: block; padding: 0 18px 18px; color: var(--primary-color, #03a9f4); font-size: 13px; }
+      .chc-schedule-editor { margin: 0 18px 18px; border: 1px solid var(--divider-color, rgba(127, 127, 127, .25)); border-radius: 9px; }
+      .chc-schedule-editor > summary { padding: 12px; cursor: pointer; font-weight: 700; }
+      .chc-schedule-editor form { display: grid; gap: 10px; padding: 0 12px 12px; }
+      .chc-enable { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+      .chc-schedule-hint { margin: 0; color: var(--secondary-text-color, #667085); font-size: 12px; }
+      .chc-schedule-day { min-width: 0; margin: 0; border: 1px solid var(--divider-color, rgba(127, 127, 127, .2)); border-radius: 7px; padding: 9px; }
+      .chc-schedule-day legend { padding: 0 5px; font-size: 13px; font-weight: 700; }
+      .chc-period { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: end; gap: 7px; margin-bottom: 7px; }
+      .chc-period label { display: grid; gap: 4px; color: var(--secondary-text-color, #667085); font-size: 11px; }
+      .chc-period input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 36px; padding: 5px; border: 1px solid var(--divider-color, #aaa); border-radius: 6px; color: inherit; background: var(--card-background-color, #fff); font: inherit; }
+      .chc-period button, .chc-add, .chc-schedule-footer button { min-height: 34px; padding: 6px 9px; border: 1px solid var(--divider-color, #aaa); border-radius: 6px; color: var(--primary-text-color, #1f2933); background: var(--card-background-color, #fff); font: inherit; cursor: pointer; }
+      .chc-add { color: var(--primary-color, #03a9f4); }
+      .chc-schedule-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+      .chc-schedule-footer span { color: var(--secondary-text-color, #667085); font-size: 12px; }
       .chc-target {
         margin-top: 2px;
         font-size: 34px;

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from functools import partial
+import json
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -47,8 +50,14 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .config_flow import _climate_capabilities, _validate_settings
+from .config_flow import _climate_capabilities, _default_settings, _validate_settings
 from .const import (
+    CONF_SMART_SCHEDULE_ENABLED,
+    CONF_SMART_COMFORT_SCHEDULE,
+    CONF_SMART_NIGHT_START,
+    CONF_SMART_NIGHT_END,
+    CONF_SMART_NIGHT_TEMPERATURE,
+    CONF_SMART_DAYTIME_DROP,
     CONF_ACTIVE_HVAC_MODE,
     CONF_ARRIVAL_TIME,
     CONF_CLIMATE,
@@ -79,6 +88,8 @@ from .forecast_accuracy import ForecastAccuracyTracker
 from .forecast_inputs import ForecastInputs, _celsius
 from .models import (
     ControlInputs,
+    ControlResult,
+    ControllerStatus,
     ControllerSettings,
     ControllerState,
     JsonPrimitive,
@@ -88,6 +99,7 @@ from .models import (
 from .policy import evaluate_policy
 from .repairs import sync_missing_entity_issues
 from .storage import ControllerStore
+from .smart_schedule import plan_smart_schedule
 from .travel import destination_is_home, preheat_timing
 
 _LOGGER = logging.getLogger(__name__)
@@ -184,7 +196,7 @@ def _temperature_capabilities(
     fallback_unit: str,
 ) -> TemperatureCapabilities | None:
     """Return validated thermostat metadata with a safe native unit."""
-    capabilities, error = _climate_capabilities(climate)
+    capabilities, error = _climate_capabilities(climate, fallback_unit)
     if error is not None or capabilities is None:
         return None
 
@@ -250,6 +262,35 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._override_revision = 0
         self._evaluation_idle = asyncio.Event()
         self._evaluation_idle.set()
+        self._preview_context = None
+        self._preview_cache = None
+
+    @property
+    def controller_mode(self) -> str:
+        if not self.persistent_state.auto_mode:
+            return "off"
+        return "away" if self.persistent_state.forced_away else "auto"
+
+    def _away_observe_person(self, entity_id: str, state: State | None) -> bool:
+        """Track real per-person absence/return; unknown is never a departure."""
+        if self.controller_mode != "away" or not self._available(state):
+            return False
+        zone = self.hass.states.get(self.config[CONF_HOME_ZONE])
+        if not self._available(zone):
+            return False
+        people = {person: None for person in self.config[CONF_PERSONS]}
+        people[entity_id] = state
+        home = self._occupied(people, zone)
+        armed = self.persistent_state.away_seen_absent
+        if not home and entity_id not in armed:
+            armed.append(entity_id)
+            return True
+        if home and entity_id in armed:
+            self.persistent_state.forced_away = False
+            self.persistent_state.away_seen_absent = []
+            self.persistent_state.away_selected_at = None
+            return True
+        return False
 
     @property
     def config(self) -> dict[str, Any]:
@@ -417,6 +458,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     async def _async_classify_event(self, event: _CapturedEvent) -> None:
         """Classify command echoes and event-ordered policy transitions."""
+        if event.entity_id in self.config[CONF_PERSONS]:
+            selected = self.persistent_state.away_selected_at
+            if (event.new_state is not None and (selected is None or event.new_state.last_updated > selected)
+                    and self._away_observe_person(event.entity_id, event.new_state)):
+                await self.store.async_save(self.persistent_state)
         if event.policy_transition:
             self._pending_override_action = _OverrideAction(None)
         if event.entity_id == self.config[CONF_CLIMATE] and event.new_state is not None:
@@ -847,6 +893,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             settings.maximum_warmup_minutes,
         )
 
+        away_changed = False
+        for person_id, person in person_states.items():
+            away_changed = self._away_observe_person(person_id, person) or away_changed
+        if away_changed:
+            await self.store.async_save(self.persistent_state)
         occupied = self._occupied(person_states, home_zone)
         schedule_high = schedule is not None and schedule.state == "on"
         journey_home = self._journey_home(destination, home_zone)
@@ -863,6 +914,18 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             preheat_ready = timing.ready
             arrival = timing.arrival
             start = timing.start
+
+        if (self.controller_mode == "away" and journey_home and self._available(destination)
+                and now - destination.last_reported <= timedelta(minutes=30)
+                and (arrival is not None and arrival >= now or not arrival_entity)):
+            self.persistent_state.forced_away = False
+            self.persistent_state.away_seen_absent = []
+            self.persistent_state.away_selected_at = None
+            await self.store.async_save(self.persistent_state)
+        if self.controller_mode == "away":
+            occupied = False
+            journey_home = False
+            preheat_ready = False
 
         blast_active = False
         if self.persistent_state.blast_until is not None:
@@ -926,6 +989,9 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 evaluated_at=now,
             )
         )
+        if self.controller_mode == "away" and thermostat_available:
+            result = ControlResult(ControllerStatus.AWAY, settings.eco_temperature,
+                                   settings.active_hvac_mode, "away_mode_latched")
         state = ControllerState(
             result=result,
             current_temperature=current_temperature,
@@ -938,6 +1004,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             auto_mode=self.persistent_state.auto_mode,
             temperature_forecast=(self.data.temperature_forecast if self.data else {}),
             heating_cost=(self.data.heating_cost if self.data else {}),
+            smart_plan=(self.data.smart_plan if self.data else {}),
         )
         if state != self.data:
             self.async_set_updated_data(state)
@@ -945,6 +1012,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         await self._async_apply_commands(climate, result.hvac_mode, result.target_temperature)
         if (
             preserve_stale_echo
+            and self.controller_mode == "auto"
             and climate is not None
             and self.persistent_state.manual_override_target is not None
         ):
@@ -953,6 +1021,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             )
         self._stale_own_target_echo = False
         self._cost_forecast = []
+        self._preview_context = None
         if config.get(CONF_WEATHER) and config.get(CONF_OUTDOOR_TEMP):
             forecast = await self._async_temperature_forecast(
                 now, state, climate, occupied, schedule_high, journey_home, preheat_ready
@@ -966,11 +1035,115 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
             cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
                     for day in ("today", "tomorrow")}
-        state = replace(state, heating_cost=cost)
+        preview = await self._async_smart_preview(now, state, occupied, journey_home)
+        state = replace(state, heating_cost=cost, smart_plan=preview)
         if state != self.data:
             self.async_set_updated_data(state)
             self._skip_duplicate_listener_update = True
         return state
+
+    def smart_settings(self) -> dict:
+        """Return native-unit settings even when no forecast is available."""
+        climate = self._climate_state()
+        capabilities, error = _climate_capabilities(climate, self.hass.config.units.temperature_unit) if climate else (None, None)
+        defaults = _default_settings(self.hass, capabilities) if capabilities else {
+            CONF_SMART_SCHEDULE_ENABLED: True, CONF_SMART_COMFORT_SCHEDULE: "{}",
+            CONF_SMART_NIGHT_START: "23:00", CONF_SMART_NIGHT_END: "07:00",
+            CONF_SMART_NIGHT_TEMPERATURE: 16, CONF_SMART_DAYTIME_DROP: 2,
+        }
+        config = defaults | self.config
+        return {
+            "enabled": config[CONF_SMART_SCHEDULE_ENABLED],
+            "weekly_schedule": json.loads(config[CONF_SMART_COMFORT_SCHEDULE]),
+            "night_start": config[CONF_SMART_NIGHT_START],
+            "night_end": config[CONF_SMART_NIGHT_END],
+            "night_temperature": config[CONF_SMART_NIGHT_TEMPERATURE],
+            "daytime_drop": config[CONF_SMART_DAYTIME_DROP],
+        }
+
+    async def async_update_smart_schedule(self, payload: dict) -> None:
+        """Validate the complete settings before saving an editable preview."""
+        climate = self._climate_state()
+        capabilities, error = _climate_capabilities(climate, self.hass.config.units.temperature_unit) if climate else (None, None)
+        if error or capabilities is None:
+            raise HomeAssistantError("The configured thermostat capabilities are unavailable")
+        candidate = _default_settings(self.hass, capabilities) | self.config
+        mapping = {
+            "enabled": CONF_SMART_SCHEDULE_ENABLED, "weekly_schedule": CONF_SMART_COMFORT_SCHEDULE,
+            "night_start": CONF_SMART_NIGHT_START, "night_end": CONF_SMART_NIGHT_END,
+            "night_temperature": CONF_SMART_NIGHT_TEMPERATURE, "daytime_drop": CONF_SMART_DAYTIME_DROP,
+        }
+        candidate.update({key: payload[name] for name, key in mapping.items()})
+        errors, normalized = _validate_settings(candidate, capabilities)
+        if errors or normalized is None:
+            raise HomeAssistantError(f"Invalid schedule: {next(iter(errors.values()))}")
+        self.hass.config_entries.async_update_entry(self.entry, options=dict(self.entry.options) | normalized)
+
+    async def _async_smart_preview(self, now, state, occupied, journey_home) -> dict:
+        """Simulate proposed targets separately from every live control decision."""
+        settings = self.smart_settings()
+        base = {"settings": settings, "preview": True, "forecast": [], "state": "disabled"}
+        if not settings["enabled"] or self.controller_mode == "off":
+            return base | {"explanation": "Schedule preview is disabled"}
+        if self._preview_context is None:
+            return base | {"state": "unavailable", "explanation": "Waiting for temperature and weather forecasts"}
+        indoor, inputs, unit = self._preview_context
+        arrival = state.arrival_time if journey_home and self.controller_mode == "auto" else None
+        key = (round(indoor, 1), occupied, arrival, self.controller_mode,
+               json.dumps(settings, sort_keys=True), self.settings.high_temperature, self.settings.eco_temperature)
+        cache = self._preview_cache
+        if cache and cache[0] == key and timedelta(0) <= now - cache[1] < timedelta(minutes=5):
+            return cache[2]
+        try:
+            zone = dt_util.get_time_zone(self.hass.config.time_zone)
+            local_now = now.astimezone(zone)
+            use_weekly_schedule = any(settings["weekly_schedule"].values())
+            hours = 36
+            try:
+                inputs.outdoor_temperature(now + timedelta(hours=hours))
+            except ValueError:
+                hours = 24
+            planner = partial(
+                plan_smart_schedule, local_now, indoor, inputs.outdoor_temperature,
+                deepcopy(self.thermal_model), settings["weekly_schedule"],
+                occupied_at=lambda at: occupied, arrival_at=arrival,
+                comfort_at=None if use_weekly_schedule else inputs.schedule_high,
+                night_start=settings["night_start"], night_end=settings["night_end"],
+                comfort_temperature=_celsius(self.settings.high_temperature, unit),
+                daytime_drop=settings["daytime_drop"] * (5 / 9 if unit == "°F" else 1),
+                night_minimum=_celsius(settings["night_temperature"], unit),
+                away_eco=_celsius(self.settings.eco_temperature, unit), hours=hours,
+            )
+            plan = await self.hass.async_add_executor_job(planner)
+            def native(value):
+                return round(TemperatureConverter.convert(value, "°C", unit), 2) if value is not None else None
+            explanation = "Preview only — your current heating schedule remains in control."
+            if plan.provisional:
+                explanation += " Still learning how your house heats and cools."
+            if not plan.feasible:
+                explanation += " The model cannot yet reach all comfort temperatures in time."
+            result = base | {
+                "state": "preview", "temperature_unit": unit, "generated_at": now.isoformat(),
+                "explanation": explanation, "provisional": plan.provisional, "feasible": plan.feasible,
+                "comfort_shortfall_c": plan.comfort_shortfall_c,
+                "schedule_source": "integration" if use_weekly_schedule else "existing_schedule",
+                "recovery_lead_minutes": plan.recovery_lead_minutes,
+                "estimated_demand_hours": round(plan.total_demand_hours, 3),
+                "terminal_recovery_demand_hours": round(plan.terminal_recovery_cost_hours, 3),
+                "objective_demand_hours": round(plan.objective_demand_hours, 3),
+                "cost_basis": "Minimises predicted heating demand at a constant gas rate; savings are not measured",
+                "gap_drops": [{"start": gap.start.isoformat(), "end": gap.end.isoformat(),
+                               "drop": round(gap.drop * (1.8 if unit == "°F" else 1), 2)} for gap in plan.gap_drops],
+                "forecast": [{"datetime": point.at.isoformat(), "temperature": native(point.indoor_temperature),
+                              "target_temperature": native(point.target_temperature),
+                              "heating_demand_percent": round(point.demand * 100, 1)}
+                             for point in plan.points if point.at <= now + timedelta(hours=24)],
+            }
+            self._preview_cache = (key, now, result)
+            return result
+        except Exception:
+            _LOGGER.warning("Smart schedule preview unavailable", exc_info=True)
+            return base | {"state": "unavailable", "explanation": "The schedule preview could not be calculated"}
 
     def _cost_sources(self) -> list[str | None]:
         return [self.config.get(key) for key in
@@ -1111,6 +1284,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             )
             if not inputs.available:
                 return base | {"reason": inputs.reason}
+            self._preview_context = (indoor, inputs, unit)
             settings = self.settings
             blast_until = self.persistent_state.blast_until
             override = self.persistent_state.manual_override_target
@@ -1118,6 +1292,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
             def target(at: datetime) -> float | None:
                 nonlocal override_valid
+                if self.controller_mode == "away":
+                    return _celsius(settings.eco_temperature, unit)
                 high = inputs.schedule_high(at)
                 ready = journey_home and (state.preheat_start_time is None and preheat_ready
                                          or state.preheat_start_time is not None
@@ -1297,17 +1473,28 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         """Persist strict Auto mode and immediately re-evaluate."""
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
-        self.persistent_state.auto_mode = enabled
+        await self.async_set_controller_mode("auto" if enabled else "off")
+
+    async def async_set_controller_mode(self, mode: str) -> None:
+        """Set the explicit operating mode, independently of preview planning."""
+        if mode not in ("auto", "away", "off"):
+            raise ValueError("Unsupported controller mode")
+        self.persistent_state.auto_mode = mode != "off"
+        self.persistent_state.forced_away = mode == "away"
+        self.persistent_state.away_seen_absent = []
+        self.persistent_state.away_selected_at = dt_util.utcnow() if mode == "away" else None
         self._set_manual_override(None, None)
-        if not enabled:
-            self.persistent_state.blast_until = None
+        self.persistent_state.blast_until = None
+        if mode == "away":
+            for person in self.config[CONF_PERSONS]:
+                self._away_observe_person(person, self.hass.states.get(person))
         await self.store.async_save(self.persistent_state)
         self._override_dirty = False
         await self.async_refresh()
 
     async def async_start_blast(self) -> bool:
         """Start or restart the fixed-duration heat blast."""
-        if not self.persistent_state.auto_mode:
+        if self.controller_mode != "auto":
             return False
         self._set_manual_override(None, None)
         self.persistent_state.blast_until = dt_util.utcnow() + timedelta(minutes=HEAT_BLAST_MINUTES)
@@ -1333,15 +1520,18 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         climate = self._climate_state()
         if climate is None:
             raise HomeAssistantError("The configured climate entity is unavailable")
-        capabilities, error = _climate_capabilities(climate)
+        capabilities, error = _climate_capabilities(climate, self.hass.config.units.temperature_unit)
         if error or capabilities is None:
             raise HomeAssistantError("The configured climate capabilities are invalid")
-        candidate = {setting: self.config.get(setting) for setting in _SETTING_KEYS}
+        candidate = _default_settings(self.hass, capabilities) | self.config
         candidate[key] = value
         errors, normalized = _validate_settings(candidate, capabilities)
         if errors or normalized is None:
             raise HomeAssistantError(f"Invalid setting: {next(iter(errors.values()))}")
-        options = dict(self.entry.options) | normalized
+        options = dict(self.entry.options) | {
+            name: value for name, value in normalized.items()
+            if name in _SETTING_KEYS or name in self.config
+        }
         self._set_manual_override(None, None)
         await self.store.async_save(self.persistent_state)
         self._override_dirty = False

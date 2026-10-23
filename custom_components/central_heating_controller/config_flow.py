@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -23,7 +25,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import ATTR_SUPPORTED_FEATURES, UnitOfTemperature, UnitOfTime
+from homeassistant.const import ATTR_SUPPORTED_FEATURES, ATTR_UNIT_OF_MEASUREMENT, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
 
@@ -42,6 +44,12 @@ from .const import (
     CONF_PERSONS,
     CONF_RESET_LEARNING,
     CONF_SCHEDULE,
+    CONF_SMART_SCHEDULE_ENABLED,
+    CONF_SMART_COMFORT_SCHEDULE,
+    CONF_SMART_NIGHT_START,
+    CONF_SMART_NIGHT_END,
+    CONF_SMART_NIGHT_TEMPERATURE,
+    CONF_SMART_DAYTIME_DROP,
     CONF_WEATHER,
     CONF_OUTDOOR_TEMP,
     CONF_HEATING_ACTIVITY,
@@ -54,6 +62,14 @@ from .const import (
     DEFAULT_LOW_C,
     DEFAULT_LOW_F,
     DEFAULT_MAX_WARMUP_MINUTES,
+    DEFAULT_SMART_SCHEDULE_ENABLED,
+    DEFAULT_SMART_COMFORT_SCHEDULE,
+    DEFAULT_SMART_NIGHT_START,
+    DEFAULT_SMART_NIGHT_END,
+    DEFAULT_SMART_NIGHT_TEMPERATURE_C,
+    DEFAULT_SMART_NIGHT_TEMPERATURE_F,
+    DEFAULT_SMART_DAYTIME_DROP_C,
+    DEFAULT_SMART_DAYTIME_DROP_F,
     DOMAIN,
     NAME,
     OPT_RESET_LEARNING_REQUESTED,
@@ -67,7 +83,16 @@ _SETTING_FIELDS = (
     CONF_FALLBACK_MINUTES,
     CONF_MAX_WARMUP_MINUTES,
     CONF_DESTINATION_HOME_VALUE,
+    CONF_SMART_SCHEDULE_ENABLED,
+    CONF_SMART_COMFORT_SCHEDULE,
+    CONF_SMART_NIGHT_START,
+    CONF_SMART_NIGHT_END,
+    CONF_SMART_NIGHT_TEMPERATURE,
+    CONF_SMART_DAYTIME_DROP,
 )
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +103,7 @@ class _ClimateCapabilities:
     min_temp: float
     max_temp: float
     temp_step: float | None
+    temperature_unit: str
 
 
 class _SemanticNumberSelector(selector.NumberSelector):
@@ -167,7 +193,9 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _climate_capabilities(state: Any) -> tuple[_ClimateCapabilities | None, str | None]:
+def _climate_capabilities(
+    state: Any, fallback_unit: str = UnitOfTemperature.CELSIUS
+) -> tuple[_ClimateCapabilities | None, str | None]:
     """Extract usable climate metadata and its translated error, if any."""
     features = state.attributes.get(ATTR_SUPPORTED_FEATURES)
     if isinstance(features, bool) or not isinstance(features, int):
@@ -196,7 +224,9 @@ def _climate_capabilities(state: Any) -> tuple[_ClimateCapabilities | None, str 
     ):
         return None, "invalid_climate"
 
-    return _ClimateCapabilities(active_modes, min_temp, max_temp, temp_step), None
+    raw_unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT, fallback_unit)
+    temperature_unit = raw_unit if raw_unit in (UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT) else fallback_unit
+    return _ClimateCapabilities(active_modes, min_temp, max_temp, temp_step, temperature_unit), None
 
 
 def _entry_climate(entry: ConfigEntry) -> Any:
@@ -282,7 +312,9 @@ def _validate_entities(
 
     climate_state = hass.states.get(climate)
     assert climate_state is not None
-    capabilities, error = _climate_capabilities(climate_state)
+    capabilities, error = _climate_capabilities(
+        climate_state, hass.config.units.temperature_unit
+    )
     if error:
         return {CONF_CLIMATE: error}, None
     return {}, capabilities
@@ -321,11 +353,21 @@ def _temperature_matches_step(value: float, capabilities: _ClimateCapabilities) 
 
 
 def _default_settings(hass: HomeAssistant, capabilities: _ClimateCapabilities) -> dict[str, Any]:
-    """Build locale-aware defaults clamped to thermostat limits."""
-    if hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+    """Build thermostat-unit defaults clamped to thermostat limits."""
+    if capabilities.temperature_unit == UnitOfTemperature.FAHRENHEIT:
         high, low, eco = DEFAULT_HIGH_F, DEFAULT_LOW_F, DEFAULT_ECO_F
     else:
         high, low, eco = DEFAULT_HIGH_C, DEFAULT_LOW_C, DEFAULT_ECO_C
+    smart_night_temperature = (
+        DEFAULT_SMART_NIGHT_TEMPERATURE_F
+        if capabilities.temperature_unit == UnitOfTemperature.FAHRENHEIT
+        else DEFAULT_SMART_NIGHT_TEMPERATURE_C
+    )
+    smart_daytime_drop = (
+        DEFAULT_SMART_DAYTIME_DROP_F
+        if capabilities.temperature_unit == UnitOfTemperature.FAHRENHEIT
+        else DEFAULT_SMART_DAYTIME_DROP_C
+    )
     active_mode = (
         HVACMode.HEAT
         if HVACMode.HEAT in capabilities.active_modes
@@ -339,6 +381,12 @@ def _default_settings(hass: HomeAssistant, capabilities: _ClimateCapabilities) -
         CONF_FALLBACK_MINUTES: DEFAULT_FALLBACK_MINUTES,
         CONF_MAX_WARMUP_MINUTES: DEFAULT_MAX_WARMUP_MINUTES,
         CONF_DESTINATION_HOME_VALUE: None,
+        CONF_SMART_SCHEDULE_ENABLED: DEFAULT_SMART_SCHEDULE_ENABLED,
+        CONF_SMART_COMFORT_SCHEDULE: DEFAULT_SMART_COMFORT_SCHEDULE,
+        CONF_SMART_NIGHT_START: DEFAULT_SMART_NIGHT_START,
+        CONF_SMART_NIGHT_END: DEFAULT_SMART_NIGHT_END,
+        CONF_SMART_NIGHT_TEMPERATURE: _snap_temperature(smart_night_temperature, capabilities),
+        CONF_SMART_DAYTIME_DROP: smart_daytime_drop,
     }
 
 
@@ -347,7 +395,6 @@ def _settings_schema(
     defaults: dict[str, Any],
     *,
     include_reset: bool,
-    temperature_unit: str,
 ) -> vol.Schema:
     """Return the settings schema for setup or options."""
     temperature_config = selector.NumberSelectorConfig(
@@ -355,7 +402,14 @@ def _settings_schema(
         max=capabilities.max_temp,
         step=capabilities.temp_step if capabilities.temp_step is not None else "any",
         mode=selector.NumberSelectorMode.BOX,
-        unit_of_measurement=temperature_unit,
+        unit_of_measurement=capabilities.temperature_unit,
+    )
+    smart_temperature_config = selector.NumberSelectorConfig(
+        min=capabilities.min_temp,
+        max=capabilities.max_temp,
+        step=capabilities.temp_step if capabilities.temp_step is not None else "any",
+        mode=selector.NumberSelectorMode.BOX,
+        unit_of_measurement=capabilities.temperature_unit,
     )
     duration_config = selector.NumberSelectorConfig(
         min=5,
@@ -386,6 +440,16 @@ def _settings_schema(
             CONF_MAX_WARMUP_MINUTES, default=defaults[CONF_MAX_WARMUP_MINUTES]
         ): _SemanticNumberSelector(duration_config),
         vol.Optional(CONF_DESTINATION_HOME_VALUE): selector.TextSelector(),
+        vol.Optional(CONF_SMART_SCHEDULE_ENABLED, default=defaults[CONF_SMART_SCHEDULE_ENABLED]): selector.BooleanSelector(),
+        vol.Optional(CONF_SMART_COMFORT_SCHEDULE, default=defaults[CONF_SMART_COMFORT_SCHEDULE]): selector.TextSelector(
+            selector.TextSelectorConfig(multiline=True)
+        ),
+        vol.Optional(CONF_SMART_NIGHT_START, default=defaults[CONF_SMART_NIGHT_START]): selector.TextSelector(),
+        vol.Optional(CONF_SMART_NIGHT_END, default=defaults[CONF_SMART_NIGHT_END]): selector.TextSelector(),
+        vol.Optional(CONF_SMART_NIGHT_TEMPERATURE, default=defaults[CONF_SMART_NIGHT_TEMPERATURE]): _SemanticNumberSelector(smart_temperature_config),
+        vol.Optional(CONF_SMART_DAYTIME_DROP, default=defaults[CONF_SMART_DAYTIME_DROP]): _SemanticNumberSelector(
+            selector.NumberSelectorConfig(min=0, max=9 if capabilities.temperature_unit == UnitOfTemperature.FAHRENHEIT else 5, step="any", mode=selector.NumberSelectorMode.BOX, unit_of_measurement=capabilities.temperature_unit)
+        ),
     }
     if include_reset:
         schema[vol.Optional(CONF_RESET_LEARNING, default=False)] = selector.BooleanSelector()
@@ -393,13 +457,14 @@ def _settings_schema(
 
 
 def _validate_settings(
-    user_input: dict[str, Any], capabilities: _ClimateCapabilities
+    user_input: dict[str, Any], capabilities: _ClimateCapabilities, defaults: dict[str, Any] | None = None
 ) -> tuple[dict[str, str], dict[str, Any] | None]:
     """Validate and normalize editable settings."""
     if user_input.get(CONF_ACTIVE_HVAC_MODE) not in capabilities.active_modes:
         return {CONF_ACTIVE_HVAC_MODE: "unsupported_hvac_mode"}, None
 
     normalized: dict[str, Any] = {CONF_ACTIVE_HVAC_MODE: user_input[CONF_ACTIVE_HVAC_MODE]}
+    defaults = defaults or {}
     for field in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
         value = _finite_number(user_input.get(field))
         if value is None:
@@ -428,6 +493,51 @@ def _validate_settings(
     normalized[CONF_DESTINATION_HOME_VALUE] = (
         stripped if isinstance(override, str) and (stripped := override.strip()) else None
     )
+    enabled = user_input.get(CONF_SMART_SCHEDULE_ENABLED, defaults.get(CONF_SMART_SCHEDULE_ENABLED, False))
+    if not isinstance(enabled, bool):
+        return {CONF_SMART_SCHEDULE_ENABLED: "invalid_smart_schedule"}, None
+    normalized[CONF_SMART_SCHEDULE_ENABLED] = enabled
+    raw_schedule = user_input.get(CONF_SMART_COMFORT_SCHEDULE, defaults.get(CONF_SMART_COMFORT_SCHEDULE, "{}"))
+    try:
+        schedule = json.loads(raw_schedule, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))) if isinstance(raw_schedule, str) else raw_schedule
+    except (ValueError, TypeError):
+        return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+    if not isinstance(schedule, dict) or any(day not in _WEEKDAYS for day in schedule):
+        return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+    for periods in schedule.values():
+        if not isinstance(periods, list):
+            return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+        previous_end = -1
+        for period in periods:
+            if not isinstance(period, dict) or set(period) != {"start", "end"}:
+                return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+            start, end = period["start"], period["end"]
+            if not isinstance(start, str) or not _TIME_PATTERN.fullmatch(start) or not isinstance(end, str) or not _TIME_PATTERN.fullmatch(end):
+                return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+            start_minute = int(start[:2]) * 60 + int(start[3:])
+            end_minute = int(end[:2]) * 60 + int(end[3:])
+            if start_minute >= end_minute or start_minute < previous_end:
+                return {CONF_SMART_COMFORT_SCHEDULE: "invalid_comfort_schedule"}, None
+            previous_end = end_minute
+    normalized[CONF_SMART_COMFORT_SCHEDULE] = json.dumps(schedule, separators=(",", ":"))
+    for field in (CONF_SMART_NIGHT_START, CONF_SMART_NIGHT_END):
+        value = user_input.get(field, defaults.get(field))
+        if not isinstance(value, str) or not _TIME_PATTERN.fullmatch(value):
+            return {field: "invalid_smart_time"}, None
+        normalized[field] = value
+    if normalized[CONF_SMART_NIGHT_START] == normalized[CONF_SMART_NIGHT_END]:
+        return {CONF_SMART_NIGHT_END: "invalid_smart_time"}, None
+    night_temperature = _finite_number(user_input.get(CONF_SMART_NIGHT_TEMPERATURE, defaults.get(CONF_SMART_NIGHT_TEMPERATURE)))
+    if night_temperature is None:
+        return {CONF_SMART_NIGHT_TEMPERATURE: "invalid_number"}, None
+    if not capabilities.min_temp <= night_temperature <= normalized[CONF_HIGH_TEMP] or not _temperature_matches_step(night_temperature, capabilities):
+        return {CONF_SMART_NIGHT_TEMPERATURE: "smart_temperature_out_of_range"}, None
+    normalized[CONF_SMART_NIGHT_TEMPERATURE] = night_temperature
+    drop = _finite_number(user_input.get(CONF_SMART_DAYTIME_DROP, defaults.get(CONF_SMART_DAYTIME_DROP)))
+    max_drop = 9 if capabilities.temperature_unit == UnitOfTemperature.FAHRENHEIT else 5
+    if drop is None or not 0 <= drop <= max_drop:
+        return {CONF_SMART_DAYTIME_DROP: "invalid_daytime_drop"}, None
+    normalized[CONF_SMART_DAYTIME_DROP] = drop
     return {}, normalized
 
 
@@ -474,7 +584,7 @@ class CentralHeatingControllerConfigFlow(ConfigFlow, domain=DOMAIN):
         defaults = _default_settings(self.hass, self._capabilities)
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors, settings = _validate_settings(user_input, self._capabilities)
+            errors, settings = _validate_settings(user_input, self._capabilities, defaults)
             if not errors:
                 if _climate_collision(self.hass, self._entity_input[CONF_CLIMATE]):
                     return self.async_abort(reason="already_configured")
@@ -488,7 +598,6 @@ class CentralHeatingControllerConfigFlow(ConfigFlow, domain=DOMAIN):
             self._capabilities,
             defaults,
             include_reset=False,
-            temperature_unit=self.hass.config.units.temperature_unit,
         )
         return self.async_show_form(
             step_id="settings",
@@ -538,7 +647,7 @@ class CentralHeatingControllerOptionsFlow(OptionsFlow):
         }
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors, settings = _validate_settings(user_input, self._capabilities)
+            errors, settings = _validate_settings(user_input, self._capabilities, defaults)
             if not errors:
                 selected_climate = self._entity_input[CONF_CLIMATE]
                 if _climate_collision(self.hass, selected_climate, exclude_entry=self.config_entry):
@@ -571,7 +680,6 @@ class CentralHeatingControllerOptionsFlow(OptionsFlow):
             self._capabilities,
             defaults,
             include_reset=True,
-            temperature_unit=self.hass.config.units.temperature_unit,
         )
         return self.async_show_form(
             step_id="settings",

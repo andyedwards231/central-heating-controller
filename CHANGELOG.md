@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.5.0 — 2026-10-23
+
+## Smart heating schedule preview
+
+- Adds editable weekly comfort windows, configurable night times (23:00–07:00 by default), a 16°C night minimum and a dynamic daytime allowance up to 2°C.
+- Simulates different setbacks and recovery start times using learned heating delay, heat loss, outdoor forecasts and known arrival times. Shows a separate 24-hour preview with expected heating shaded. Preview is enabled by default and **does not apply its targets**: the existing schedule remains in control.
+- Adds Auto / Away / Off via `select.central_heating_controller_controller_mode`. These modes take effect immediately. Away holds the Eco temperature until a valid homeward journey or a tracked person returns after being away; someone already home when Away is selected must leave and return. Off turns the climate entity off.
+- Adds a schedule editor to the main card. The High setting remains your comfort temperature. With no weekly periods entered, the preview uses your existing Home Assistant schedule.
+- Cost optimisation uses predicted demand at a constant gas rate and accounts for estimated remaining recovery at the forecast boundary. It is a bounded search, not a guaranteed financial optimum. Uncalibrated or unreachable plans are labelled. Current heating-cost sensors and accuracy tracking continue to describe the live schedule.
+
+## Install
+
+Update through HACS and restart Home Assistant. Replace `/config/www/central-heating-controller-card.js` with the attached file, set the dashboard resource to `/local/central-heating-controller-card.js?v=1.5.0`, and refresh. Existing card YAML remains valid. Open **Schedule and night settings** on the main card to edit the preview.
+
+Arrival preheating needs the configured homeward destination and a usable ETA. Without an ETA, existing immediate-preheat behaviour remains available, but the preview cannot promise an arrival temperature.
+
+
 ## 1.4.1 — 2026-10-23
 
 Keep heating-cost learning diagnostics visible before a price is available. Home Assistant now shows unknown with a reason and calibration attributes instead of hiding those attributes behind unavailable. Add observation count and first/last observation times so collection can be verified before the first complete gas interval. No change to heating control or stored learning.

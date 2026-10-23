@@ -13,7 +13,7 @@ import voluptuous as vol
 
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult, FlowResultType
 from homeassistant.helpers import selector
@@ -37,6 +37,12 @@ from custom_components.central_heating_controller.const import (
     CONF_MAX_WARMUP_MINUTES,
     CONF_PERSONS,
     CONF_SCHEDULE,
+    CONF_SMART_SCHEDULE_ENABLED,
+    CONF_SMART_COMFORT_SCHEDULE,
+    CONF_SMART_NIGHT_START,
+    CONF_SMART_NIGHT_END,
+    CONF_SMART_NIGHT_TEMPERATURE,
+    CONF_SMART_DAYTIME_DROP,
     DOMAIN,
 )
 
@@ -72,6 +78,12 @@ SETTINGS_INPUT = {
     CONF_FALLBACK_MINUTES: 60,
     CONF_MAX_WARMUP_MINUTES: 180,
     CONF_DESTINATION_HOME_VALUE: "Home",
+    CONF_SMART_SCHEDULE_ENABLED: False,
+    CONF_SMART_COMFORT_SCHEDULE: "{}",
+    CONF_SMART_NIGHT_START: "23:00",
+    CONF_SMART_NIGHT_END: "07:00",
+    CONF_SMART_NIGHT_TEMPERATURE: 16.0,
+    CONF_SMART_DAYTIME_DROP: 2.0,
 }
 
 
@@ -151,6 +163,22 @@ async def test_user_and_settings_create_entry(hass: HomeAssistant) -> None:
     assert result["data"] == BASE_INPUT
     assert result["options"] == SETTINGS_INPUT
     assert result["result"].unique_id == CLIMATE
+
+
+@pytest.mark.asyncio
+async def test_smart_settings_default_when_omitted(hass: HomeAssistant) -> None:
+    """Partial settings submissions receive safe preview defaults."""
+    _set_required_states(hass)
+    result = await _reach_settings(hass)
+    base_settings = {key: value for key, value in SETTINGS_INPUT.items() if not key.startswith("smart_")}
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input=base_settings)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_SMART_SCHEDULE_ENABLED] is True
+    assert result["options"][CONF_SMART_COMFORT_SCHEDULE] == "{}"
+    assert result["options"][CONF_SMART_NIGHT_START] == "23:00"
+    assert result["options"][CONF_SMART_NIGHT_END] == "07:00"
+    assert result["options"][CONF_SMART_NIGHT_TEMPERATURE] == 16.0
+    assert result["options"][CONF_SMART_DAYTIME_DROP] == 2.0
 
 
 @pytest.mark.asyncio
@@ -385,6 +413,23 @@ async def test_celsius_defaults_and_settings_selectors(hass: HomeAssistant) -> N
 
 
 @pytest.mark.asyncio
+async def test_smart_temperature_defaults_use_thermostat_unit(hass: HomeAssistant) -> None:
+    """Smart temperature defaults and selector units follow the thermostat."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    _set_required_states(hass, climate_attributes={ATTR_UNIT_OF_MEASUREMENT: "°C"})
+    result = await _reach_settings(hass)
+    fields = _schema_fields(result)
+    assert fields[CONF_SMART_NIGHT_TEMPERATURE][0].default() == 16.0
+    assert fields[CONF_SMART_NIGHT_TEMPERATURE][1].config["unit_of_measurement"] == "°C"
+    assert fields[CONF_SMART_DAYTIME_DROP][0].default() == 2.0
+    assert fields[CONF_HIGH_TEMP][0].default() == 20.0
+    assert fields[CONF_LOW_TEMP][0].default() == 17.0
+    assert fields[CONF_ECO_TEMP][0].default() == 14.0
+    for field in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
+        assert fields[field][1].config["unit_of_measurement"] == "°C"
+
+
+@pytest.mark.asyncio
 async def test_fahrenheit_and_narrow_range_defaults_preserve_order(
     hass: HomeAssistant,
 ) -> None:
@@ -456,6 +501,12 @@ async def test_non_heat_climate_uses_first_active_mode_default(
         ({CONF_MAX_WARMUP_MINUTES: 365}, CONF_MAX_WARMUP_MINUTES, "invalid_duration"),
         ({CONF_FALLBACK_MINUTES: 62}, CONF_FALLBACK_MINUTES, "invalid_duration"),
         ({CONF_MAX_WARMUP_MINUTES: False}, CONF_MAX_WARMUP_MINUTES, "invalid_number"),
+        ({CONF_SMART_COMFORT_SCHEDULE: "{bad"}, CONF_SMART_COMFORT_SCHEDULE, "invalid_comfort_schedule"),
+        ({CONF_SMART_COMFORT_SCHEDULE: '{"monday":[{"start":"18:00","end":"17:00"}]}'}, CONF_SMART_COMFORT_SCHEDULE, "invalid_comfort_schedule"),
+        ({CONF_SMART_NIGHT_START: "25:00"}, CONF_SMART_NIGHT_START, "invalid_smart_time"),
+        ({CONF_SMART_NIGHT_END: "23:00"}, CONF_SMART_NIGHT_END, "invalid_smart_time"),
+        ({CONF_SMART_NIGHT_TEMPERATURE: 22}, CONF_SMART_NIGHT_TEMPERATURE, "smart_temperature_out_of_range"),
+        ({CONF_SMART_DAYTIME_DROP: 5.1}, CONF_SMART_DAYTIME_DROP, "invalid_daytime_drop"),
         (
             {CONF_FALLBACK_MINUTES: 185, CONF_MAX_WARMUP_MINUTES: 180},
             "base",
