@@ -84,9 +84,12 @@ class ControllerStatusSensor(ControllerEntity, SensorEntity):
         """Return only currently meaningful controller details."""
         data = self.coordinator.data
         values = {
+            "climate_entity": self.coordinator.config["climate_entity"],
+            "schedule_entity": self.coordinator.config["schedule_entity"],
             "reason": data.result.reason,
             "current_temperature": data.current_temperature,
             "effective_target_temperature": data.result.target_temperature,
+            "current_heating_demand_percent": self.coordinator.current_heating_demand_percent(),
             "learned_heating_rate": data.learned_rate if data.learned_trusted else None,
             "manual_override": (True if data.status is ControllerStatus.MANUAL_OVERRIDE else None),
             "arrival_time": data.arrival_time,

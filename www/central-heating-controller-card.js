@@ -55,6 +55,10 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._smartControlPending = false;
     this._numberControlPending = new Set();
     this._numberControlMessage = null;
+    this._scheduleSource = null;
+    this._scheduleSaving = false;
+    this._openDetails = new Set();
+    this._scheduleRevision = 0;
   }
 
   setConfig(config) {
@@ -96,7 +100,7 @@ class CentralHeatingControllerCard extends HTMLElement {
 
   _renderEntityIds() {
     const mode = this._config?.mode;
-    if (mode === "overview") return ["status", "effectiveTarget", "controllerMode", "heatBlast", "preheatStart", "indoorTemperatureForecast", "heatingCostToday", "heatingCostTomorrow", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
+    if (mode === "overview") return ["status", "effectiveTarget", "controllerMode", "heatBlast", "preheatStart", "indoorTemperatureForecast", "heatingCostToday", "heatingCostTomorrow", "smartHeatingPlan", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
     if (mode === "schedule") return ["status", "controllerMode", "smartHeatingPlan", "indoorTemperatureForecast", "highTemperature", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
     if (mode === "learning") return ["status", "controllerMode", "indoorTemperatureForecast", "learnedRate", "heatingCostToday", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
     const existingEntities = Object.entries(this._entities)
@@ -137,6 +141,8 @@ class CentralHeatingControllerCard extends HTMLElement {
       this._cachedDateFormatters = {
         key,
         time: new Intl.DateTimeFormat(timeFormat === "system" ? undefined : language, options),
+        language: timeFormat === "system" ? undefined : language,
+        timeOptions: options,
         day: new Intl.DateTimeFormat(language, { weekday: "short", timeZone }),
       };
     }
@@ -213,10 +219,25 @@ class CentralHeatingControllerCard extends HTMLElement {
 
   async _selectControllerMode(mode) {
     if (!["auto", "away", "off"].includes(mode)) return;
-    await this._callService("select", "select_option", {
+    await this._quickAction("select", "select_option", {
       entity_id: this._entities.controllerMode,
       option: mode,
     });
+  }
+
+  async _quickAction(domain, service, data) {
+    if (this._quickPending) return;
+    this._quickPending = true;
+    this._quickMessage = "";
+    this._requestRender(true);
+    try {
+      await this._callService(domain, service, data);
+    } catch (_error) {
+      this._quickMessage = "Could not change the heating. Please try again.";
+    } finally {
+      this._quickPending = false;
+      this._requestRender(true);
+    }
   }
 
   _readiness() {
@@ -240,21 +261,21 @@ class CentralHeatingControllerCard extends HTMLElement {
   }
 
   async _setSmartHeatingControl(enabled) {
-    const { attrs, control, mode, unavailable } = this._readiness();
+    const { attrs, control, mode, unavailable, controlState, state } = this._readiness();
     if (this._smartControlPending) return;
-    if (enabled && (unavailable || attrs.ready !== true || mode !== "auto" || !control || ["unknown", "unavailable"].includes(control.state))) return;
+    if (enabled && (unavailable || state !== "ready" || attrs.ready !== true || mode !== "auto" || controlState === "paused" || !control || ["unknown", "unavailable"].includes(control.state))) return;
     if (!enabled && (!control || ["unknown", "unavailable"].includes(control.state))) return;
     this._smartControlPending = true;
     this._requestRender(true);
     try {
       await this._callService("switch", enabled ? "turn_on" : "turn_off", { entity_id: this._entities.smartHeatingControl });
-      this._smartControlMessage = enabled ? "Intelligent heating enabled."
-        : this._readiness().controlState === "paused" ? `Intelligent heating disabled. ${this._readiness().explanation}`
+      this._smartControlMessage = enabled ? "Automatic timing enabled."
+        : this._readiness().controlState === "paused" ? `Automatic timing disabled. ${this._readiness().explanation}`
           : "Returned to the existing schedule.";
     } catch (_error) {
       this._smartControlMessage = enabled
-        ? "Could not enable intelligent heating. Check the integration and try again."
-        : "Could not disable intelligent heating. Check the integration and try again.";
+        ? "Could not enable automatic timing. Check Learning and try again."
+        : "Could not disable automatic timing. Please try again.";
     } finally {
       this._smartControlPending = false;
       this._requestRender(true);
@@ -305,37 +326,65 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (!this._scheduleDraft || (!this._scheduleDraftDirty && settings !== this._scheduleSettingsSource)) {
       this._scheduleDraft = this._initialScheduleDraft(settings);
       this._scheduleSettingsSource = settings;
+      this._scheduleSource = Object.values(this._scheduleDraft.weekly_schedule).some(periods => periods.length) ? "custom" : "existing";
     }
     const draft = this._scheduleDraft;
+    const plan = this._state(this._entities.smartHeatingPlan)?.attributes || {};
+    const status = this._statusState()?.attributes || {};
+    const scheduleEntity = plan.schedule_entity || status.schedule_entity;
     const dayNames = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
-    const rows = dayNames.map(day => `
-      <fieldset class="chc-schedule-day"><legend>${this._titleCase(day)}</legend>
-        ${(draft.weekly_schedule[day] || []).map((period, index) => `
-          <div class="chc-period">
-            <label>From<input type="time" data-draft-path="weekly_schedule.${day}.${index}.start" value="${this._escape(period.start)}"></label>
-            <label>To<input type="time" data-draft-path="weekly_schedule.${day}.${index}.end" value="${this._escape(period.end)}"></label>
-            <button type="button" class="chc-remove" data-action="period-remove:${day}:${index}" aria-label="Remove ${this._titleCase(day)} period">Remove</button>
-          </div>`).join("")}
-        <button type="button" class="chc-add" data-action="period-add:${day}">Add time period</button>
-      </fieldset>`).join("");
-    return `<details class="chc-schedule-editor" ${this._scheduleEditorOpen ? "open" : ""}><summary>Schedule and night settings</summary>
-      <form data-schedule-form>
-        <label class="chc-enable"><input type="checkbox" data-draft-path="enabled" ${draft.enabled ? "checked" : ""}> Enable schedule planning</label>
-        <p class="chc-schedule-hint">${controlState === "active" ? "Comfort windows and night settings are used by intelligent heating. The High setpoint above is the live comfort temperature. Period end times are exclusive." : controlState === "fallback" ? "These settings configure intelligent heating, while the existing Home Assistant schedule controls heating during fallback. The High setpoint above remains the live comfort temperature. Period end times are exclusive." : "Comfort windows mean the home should be warm by these times; they do not switch heating on then. The High setpoint above is the comfort temperature. If no weekly windows are set, the existing Home Assistant schedule is used. Period end times are exclusive."}</p>
-        ${rows}
-        <fieldset class="chc-schedule-day"><legend>Night settings</legend>
-          <div class="chc-period">
-            <label>Night starts<input type="time" data-draft-path="night_start" value="${this._escape(draft.night_start)}"></label>
-            <label>Night ends<input type="time" data-draft-path="night_end" value="${this._escape(draft.night_end)}"></label>
-          </div>
-          <div class="chc-period">
-            <label>Night temperature<input type="number" step="0.1" data-draft-path="night_temperature" value="${this._escape(draft.night_temperature)}"></label>
-            <label>Maximum daytime drop<input type="number" step="0.1" min="0" data-draft-path="daytime_drop" value="${this._escape(draft.daytime_drop)}"></label>
-          </div>
-        </fieldset>
-        <div class="chc-schedule-footer"><button type="submit">Save schedule</button><span role="status">${this._escape(this._scheduleMessage)}</span></div>
-      </form>
-    </details>`;
+    const periodText = periods => Array.isArray(periods) && periods.length
+      ? periods.map(period => `${period.start}–${period.end}`).join(", ") : "No comfort period";
+    const existing = plan.existing_schedule;
+    const inherited = existing && typeof existing === "object"
+      ? `<div class="chc-inherited-week" aria-label="Existing comfort times">${dayNames.map(day => `<div><strong>${this._titleCase(day)}</strong><span>${this._escape(periodText(existing[day]))}</span></div>`).join("")}</div>`
+      : '<p class="chc-schedule-hint">The timetable is not available to display yet. Your existing schedule still works.</p>';
+    const rows = dayNames.map(day => {
+      const periods = draft.weekly_schedule[day] || [];
+      return `<details class="chc-schedule-day" data-detail="day-${day}" ${this._openDetails.has(`day-${day}`) ? "open" : ""}><summary><strong>${this._titleCase(day)}</strong><span>${this._escape(periodText(periods))}</span><span class="chc-day-edit">Change</span></summary><div class="chc-day-fields">
+        ${periods.map((period, index) => `<div class="chc-period"><label>Warm from<input type="time" aria-label="${this._titleCase(day)} warm from ${index + 1}" data-draft-path="weekly_schedule.${day}.${index}.start" value="${this._escape(period.start)}"></label><label>Until<input type="time" aria-label="${this._titleCase(day)} until ${index + 1}" data-draft-path="weekly_schedule.${day}.${index}.end" value="${this._escape(period.end)}"></label><button type="button" class="chc-remove" data-action="period-remove:${day}:${index}" aria-label="Remove ${this._titleCase(day)} period ${index + 1}">Remove</button></div>`).join("")}
+        <button type="button" class="chc-add" data-action="period-add:${day}" aria-label="Add ${this._titleCase(day)} comfort period">Add a period</button></div></details>`;
+    }).join("");
+    const nights = `<div class="chc-night-fields"><div class="chc-period"><label>Night starts<input type="time" data-draft-path="night_start" value="${this._escape(draft.night_start)}"></label><label>Night ends<input type="time" data-draft-path="night_end" value="${this._escape(draft.night_end)}"></label></div><div class="chc-period"><label>Night temperature<input type="number" step="0.5" data-draft-path="night_temperature" value="${this._escape(draft.night_temperature)}"></label><label>Maximum daytime drop<input type="number" step="0.5" min="0" data-draft-path="daytime_drop" value="${this._escape(draft.daytime_drop)}"></label></div><p>Between comfort periods, the house may cool by up to this amount. Automatic timing can choose a smaller drop when that uses less heating overall.</p></div>`;
+    return `<details class="chc-schedule-editor" ${this._scheduleEditorOpen ? "open" : ""}><summary>When should the house be warm?</summary><form data-schedule-form>
+      <fieldset class="chc-source-choice"><legend>Choose your timetable</legend><label><input type="radio" name="schedule-source" value="existing" data-schedule-source ${this._scheduleSource === "existing" ? "checked" : ""}> Use my existing schedule</label><label><input type="radio" name="schedule-source" value="custom" data-schedule-source ${this._scheduleSource === "custom" ? "checked" : ""}> Set comfort times here</label></fieldset>
+      ${this._scheduleSource === "existing" ? `<div class="chc-timetable"><p><strong>No need to enter the times again.</strong> The On periods in your Home Assistant schedule are the times you want warmth.</p>${inherited}${scheduleEntity ? `<button type="button" data-more-info="${this._escape(scheduleEntity)}">Open existing schedule</button>` : ""}</div>` : `<div class="chc-timetable"><p>Set the times you want to be warm, such as 07:00–09:00. Automatic timing will work out when to start heating. Days without a period stay outside comfort hours.</p><div class="chc-week-editor">${rows}</div></div>`}
+      ${this._detail("night", `Night and daytime allowance <span class="chc-summary-value">${this._escape(draft.night_temperature)}° at night · up to ${this._escape(draft.daytime_drop)}° lower by day</span>`, nights)}
+      <div class="chc-schedule-footer"><button type="submit" ${this._scheduleSaving ? "disabled" : ""}>${this._scheduleSaving ? "Saving…" : "Save comfort times"}</button><span role="status">${this._escape(this._scheduleMessage)}</span></div>
+      ${controlState !== "active" ? '<p class="chc-schedule-hint">Saved times are for automatic timing. Your existing schedule stays in control until it is enabled.</p>' : ""}
+    </form></details>`;
+  }
+
+  _setScheduleSource(source) {
+    if (!["existing", "custom"].includes(source)) return;
+    this._scheduleSource = source;
+    this._scheduleDraftDirty = true;
+    this._scheduleRevision += 1;
+    this._scheduleMessage = "";
+    this._requestRender(true);
+    this.shadowRoot.querySelector?.('[data-schedule-source]:checked')?.focus();
+  }
+
+  _showMoreInfo(entityId) {
+    if (!/^(climate|schedule)\.[a-z0-9_]+$/.test(entityId || "")) return;
+    this.dispatchEvent(new CustomEvent("hass-more-info", {detail: {entityId}, bubbles: true, composed: true}));
+  }
+
+  async _setPlanningEnabled(enabled) {
+    const settings = this._state(this._entities.smartHeatingPlan)?.attributes?.settings;
+    if (!settings || this._planningPending) return;
+    this._planningPending = true;
+    try {
+      await this._callService("central_heating_controller", "set_smart_schedule", {
+        entity_id: this._config.entity, ...this._initialScheduleDraft(settings), enabled,
+      });
+      this._planningMessage = enabled ? "Planning enabled." : "Planning disabled. Your existing schedule is in control.";
+    } catch (_error) {
+      this._planningMessage = "Could not change planning. Please try again.";
+    } finally {
+      this._planningPending = false;
+      this._requestRender(true);
+    }
   }
 
   _updateScheduleDraft(path, value) {
@@ -347,11 +396,17 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (!target || !(key in target)) return;
     target[key] = typeof value === "boolean" ? value : value;
     this._scheduleDraftDirty = true;
+    this._scheduleRevision += 1;
   }
 
   async _saveSchedule() {
     const draft = this._scheduleDraft;
-    if (!draft) return;
+    if (!draft || this._scheduleSaving) return;
+    if (this._scheduleSource === "custom" && !Object.values(draft.weekly_schedule).some(periods => periods.length)) {
+      this._scheduleMessage = "Add a comfort period, or choose your existing schedule.";
+      this._requestRender(true);
+      return;
+    }
     const toMinutes = value => {
       const match = /^(\d{2}):(\d{2})$/.exec(String(value));
       return match && Number(match[1]) < 24 && Number(match[2]) < 60;
@@ -359,7 +414,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (!toMinutes(draft.night_start) || !toMinutes(draft.night_end)
         || !Number.isFinite(Number(draft.night_temperature)) || !Number.isFinite(Number(draft.daytime_drop))
         || Number(draft.daytime_drop) < 0
-        || Object.values(draft.weekly_schedule).some(periods => periods.some(period =>
+        || this._scheduleSource !== "existing" && Object.values(draft.weekly_schedule).some(periods => periods.some(period =>
           !toMinutes(period.start) || !toMinutes(period.end)))) {
       this._scheduleMessage = "Check the times and temperature values before saving.";
       this._render();
@@ -367,21 +422,28 @@ class CentralHeatingControllerCard extends HTMLElement {
     }
     const data = {
       entity_id: this._config.entity,
-      enabled: draft.enabled,
-      weekly_schedule: draft.weekly_schedule,
+      enabled: this._state(this._entities.smartHeatingPlan)?.attributes?.settings?.enabled ?? draft.enabled,
+      weekly_schedule: this._scheduleSource === "existing" ? {} : Object.fromEntries(Object.entries(draft.weekly_schedule)
+        .map(([day, periods]) => [day, periods.map(period => ({...period}))])),
       night_start: draft.night_start,
       night_end: draft.night_end,
       night_temperature: Number(draft.night_temperature),
       daytime_drop: Number(draft.daytime_drop),
     };
+    const revision = this._scheduleRevision;
+    this._scheduleSaving = true;
+    this._requestRender(true);
     try {
       await this._callService("central_heating_controller", "set_smart_schedule", data);
-      this._scheduleMessage = "Schedule saved.";
-      this._scheduleDraftDirty = false;
+      this._scheduleMessage = revision !== this._scheduleRevision ? "Earlier changes saved. Save again to keep your latest edits."
+        : this._readiness().controlState === "active" ? "Comfort times saved." : "Saved for automatic timing. Your existing schedule is still running.";
+      this._scheduleDraftDirty = revision !== this._scheduleRevision;
     } catch (_error) {
-      this._scheduleMessage = "Could not save the schedule. Check the integration and try again.";
+      this._scheduleMessage = "Could not save the comfort times. Please try again.";
+    } finally {
+      this._scheduleSaving = false;
     }
-    this._render();
+    this._requestRender(true);
   }
 
   _setScheduleEditorOpen(open) {
@@ -393,14 +455,17 @@ class CentralHeatingControllerCard extends HTMLElement {
     const [, operation, day, indexText] = /^(period-(?:add|remove)):([^:]+)(?::(\d+))?$/.exec(action) || [];
     if (!operation || !this._scheduleDraft.weekly_schedule[day]) return;
     const periods = this._scheduleDraft.weekly_schedule[day];
-    if (operation === "period-add") periods.push({ start: "09:00", end: "17:00" });
+    if (operation === "period-add") periods.push({ start: "07:00", end: "09:00" });
     else periods.splice(Number(indexText), 1);
+    this._scheduleSource = "custom";
+    this._openDetails.add(`day-${day}`);
     this._scheduleDraftDirty = true;
+    this._scheduleRevision += 1;
     this._render();
   }
 
   async _pressHeatBlast() {
-    await this._callService("button", "press", { entity_id: this._entities.heatBlast });
+    await this._quickAction("button", "press", { entity_id: this._entities.heatBlast });
   }
 
   async _adjustNumber(entityId, direction) {
@@ -482,81 +547,204 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._renderControl();
   }
 
+  _dashboardLink(view, label) {
+    const root = this._config.dashboard_path || "/dashboard-heating";
+    const path = typeof root === "string" && /^\/[a-zA-Z0-9_/-]+$/.test(root) ? root.replace(/\/$/, "") : "/dashboard-heating";
+    return `<a class="chc-text-link" href="${path}/${view}">${this._escape(label)}</a>`;
+  }
+
+  _policySummary() {
+    const status = this._statusState();
+    const mode = this._state(this._entities.controllerMode)?.state;
+    const control = this._readiness();
+    if (["unknown", "unavailable"].includes(status?.state)) return "Waiting for heating readings. Check Learning for details.";
+    if (mode === "off" || status?.state === "off") return "Off selected. The heating will stay off until you change mode.";
+    if (mode === "away" || status?.state === "away") return "Away temperature is in use.";
+    if (status?.state === "heat_blast") return "A one-hour boost is in control.";
+    if (status?.state === "manual_override" || status?.attributes?.manual_override) return "Your manual temperature is in control.";
+    if (control.controlState === "active") return "Automatic timing is controlling the heating.";
+    if (control.controlState === "fallback") return "Your existing schedule is running while automatic timing is unavailable.";
+    if (control.controlState === "unknown") return "Heating control status is unavailable. Check Learning for details.";
+    return "Your existing schedule is controlling the heating.";
+  }
+
+  _activityLabel() {
+    const status = this._statusState();
+    if (this._state(this._entities.controllerMode)?.state === "off" || status?.state === "off") return "Off selected";
+    if (["unknown", "unavailable"].includes(status?.state)) return "Heating activity unavailable";
+    const demand = this._finiteNumber(status?.attributes?.current_heating_demand_percent
+      ?? this._state(this._entities.indoorTemperatureForecast)?.attributes?.current_heating_demand_percent);
+    if (demand !== null && demand >= 0 && demand <= 100) return demand > 0 ? "Heating requested" : "Heating idle";
+    return "Heating activity unavailable";
+  }
+
+  _forecastRows(entityId = this._entities.indoorTemperatureForecast) {
+    const state = this._state(entityId);
+    this._forecastRowsCache ||= new Map();
+    const cached = this._forecastRowsCache.get(entityId);
+    if (cached?.state === state) return cached.rows;
+    const rows = Array.isArray(state?.attributes?.forecast) ? state.attributes.forecast
+      .filter(point => point && typeof point === "object")
+      .map(point => ({ time: new Date(point.datetime).getTime(), temperature: this._finiteNumber(point.temperature),
+        target: this._finiteNumber(point.target_temperature), demand: this._finiteNumber(point.heating_demand_percent) }))
+      .filter(point => Number.isFinite(point.time) && point.temperature !== null)
+      .sort((a, b) => a.time - b.time) : [];
+    this._forecastRowsCache.set(entityId, {state, rows});
+    return rows;
+  }
+
+  _eventTime(value, now = Date.now()) {
+    const date = new Date(value);
+    const formats = this._dateFormatters();
+    const day = formats.day.format(date);
+    const today = formats.day.format(new Date(now));
+    return `${day === today ? "Today" : day} ${this._timeLabel(date)}`;
+  }
+
+  _timeLabel(value) {
+    const date = new Date(value);
+    const formats = this._dateFormatters();
+    const time = formats.time.format(date), day = formats.day.format(date);
+    // During the autumn clock change, two different instants share one clock
+    // label. Include the zone only for that repeated hour.
+    const repeated = [-3600000, 3600000].some(offset => {
+      const other = new Date(date.getTime() + offset);
+      return formats.day.format(other) === day && formats.time.format(other) === time;
+    });
+    if (!repeated) return time;
+    formats.event ||= new Intl.DateTimeFormat(formats.language, {...formats.timeOptions, timeZoneName: "short"});
+    return formats.event.format(date);
+  }
+
+  _nextChanges(now = Date.now(), entityId = this._entities.indoorTemperatureForecast) {
+    const rows = this._forecastRows(entityId);
+    const intervals = [];
+    let targetChange = null;
+    for (let i = 0; i < rows.length - 1; i++) {
+      const point = rows[i], next = rows[i + 1];
+      const continuous = next.time > point.time && next.time - point.time <= 10 * 60 * 1000;
+      if (continuous && !targetChange && next.time > now && next.target !== null
+          && (point.target === null || Math.abs(next.target - point.target) >= 0.05)) {
+        const direction = point.target === null ? "is set" : next.target > point.target ? "rises" : "falls";
+        targetChange = { time: next.time, text: `Target ${direction} to ${this._formatTemperature(next.target)}` };
+      }
+      if (!continuous || next.time <= now || point.target === null || point.demand === null
+          || point.demand <= 5 || point.demand > 100) continue;
+      const previous = intervals.at(-1);
+      if (previous?.end === point.time) previous.end = next.time;
+      else intervals.push({start: Math.max(now, point.time), end: next.time});
+    }
+    return {heating: intervals[0] || null, target: targetChange, available: rows.length > 1 && rows.at(-1).time > now};
+  }
+
+  _renderNextChanges() {
+    const mode = this._state(this._entities.controllerMode)?.state;
+    const changes = this._nextChanges();
+    const entries = [];
+    if (mode === "off") entries.push(`<li><strong>Heating stays off</strong><span>Change mode to resume your schedule.</span></li>`);
+    else {
+      if (changes.heating) {
+        const heat = changes.heating;
+        entries.push(`<li><strong>${heat.start <= Date.now() ? "Heating likely until" : "Heating likely around"} ${this._escape(this._eventTime(heat.start <= Date.now() ? heat.end : heat.start))}</strong>${heat.start > Date.now() ? `<span>Until about ${this._escape(this._eventTime(heat.end))}</span>` : ""}</li>`);
+      }
+      if (changes.target) entries.push(`<li><strong>${this._escape(changes.target.text)}</strong><span>Around ${this._escape(this._eventTime(changes.target.time))}</span></li>`);
+      if (!entries.length) entries.push(`<li><strong>${changes.available ? "No further target changes in the next 24 hours" : "Waiting for the temperature forecast"}</strong><span>${changes.available ? "Heating may still cycle to maintain the target." : "Your current heating schedule continues."}</span></li>`);
+    }
+    return `<section class="chc-next" aria-label="What happens next"><h3>What happens next</h3><ul>${entries.join("")}</ul></section>`;
+  }
+
+  _renderControlChoice() {
+    const modeEntity = this._state(this._entities.controllerMode);
+    const mode = modeEntity?.state;
+    const unavailable = !modeEntity || !["auto", "away", "off"].includes(mode);
+    return `<div class="chc-quick-controls"><label>Heating mode<select data-mode aria-label="Heating mode" ${unavailable || this._quickPending ? "disabled" : ""}>${unavailable ? "<option selected>Unavailable</option>" : ["auto", "away", "off"].map(value => `<option value="${value}" ${mode === value ? "selected" : ""}>${this._titleCase(value)}</option>`).join("")}</select></label><button type="button" data-action="blast" ${this._state(this._entities.heatBlast) && mode === "auto" && !this._quickPending ? "" : "disabled"}>Boost for 1 hour</button><span class="chc-quick-message" role="status">${this._escape(this._quickMessage || "")}</span></div>`;
+  }
+
+  _renderSmartAction() {
+    const ready = this._readiness();
+    const on = ready.control?.state === "on";
+    const available = ready.control && !["unavailable", "unknown"].includes(ready.control.state);
+    const disabled = this._smartControlPending || !available || (!on && (ready.unavailable || ready.state !== "ready" || ready.attrs.ready !== true || ready.mode !== "auto" || ready.controlState === "paused"));
+    return `<div class="chc-smart-action"><button type="button" data-action="smart-control:${on ? "off" : "on"}" ${disabled ? "disabled" : ""}>${this._smartControlPending ? "Saving…" : on ? ready.controlState === "paused" ? "Turn off automatic timing" : "Use existing schedule instead" : "Enable automatic timing"}</button><span role="status">${this._escape(this._smartControlMessage)}</span></div>`;
+  }
+
+  _learningNeeds() {
+    const readiness = this._readiness();
+    const checks = Array.isArray(readiness.attrs.checks) ? readiness.attrs.checks : [];
+    const failed = new Set(checks.filter(check => check && !check.passed).map(check => check.key));
+    const needs = [];
+    if (["thermal_windows", "model_score"].some(key => failed.has(key))) needs.push("More examples of the house heating up and cooling down.");
+    if (failed.has("heating_response")) needs.push("More heating starts and stops to measure the warm-up delay.");
+    if (failed.has("demand_model")) needs.push("More examples of how the thermostat responds to a temperature change.");
+    if (failed.has("gas_calibration")) needs.push("More gas readings during heating, to improve cost estimates.");
+    if (["accuracy_1h", "accuracy_6h", "accuracy_24h"].some(key => failed.has(key))) needs.push("More accurate temperature forecasts, checked across several days.");
+    if (failed.has("plan_feasible") && !["thermal_windows", "model_score", "heating_response", "demand_model"].some(key => failed.has(key))) needs.push("A plan that can reach your comfort temperature in time.");
+    const dataKeys = ["thermostat", "outdoor", "weather", "demand", "occupancy", "schedule", "arrival", "plan_fresh", "gas_fresh", "rate_available", "commands", "clock"];
+    if (dataKeys.some(key => failed.has(key))) needs.push("A missing reading or heating connection needs attention. See detailed checks below.");
+    if (failed.has("preview_enabled")) needs.push("Schedule planning needs to be enabled in the settings below.");
+    if (!needs.length && failed.has("stable")) needs.push("One continuous hour with all the safety checks passing.");
+    if (!needs.length && readiness.attrs.ready !== true) needs.push("Readiness information is not available yet. Check the integration.");
+    return needs;
+  }
+
+  _detail(key, title, body) {
+    return `<details class="chc-disclosure" data-detail="${key}" ${this._openDetails.has(key) ? "open" : ""}><summary>${title}</summary><div class="chc-disclosure-body">${body}</div></details>`;
+  }
+
   _renderDashboardMode(mode) {
     const active = this.shadowRoot.activeElement;
     const activePath = active?.dataset?.draftPath;
-    const selection = activePath && typeof active.selectionStart === "number"
-      ? [active.selectionStart, active.selectionEnd] : null;
+    const selection = activePath && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
     const status = this._statusState();
     const attrs = status?.attributes || {};
     const plan = this._state(this._entities.smartHeatingPlan);
-    const previewReady = plan?.state === "preview" && plan.attributes?.preview === true;
     const readiness = this._readiness();
-    const header = `<div class="chc-header"><div><div class="chc-title">${this._escape(this._config.title)}</div><div class="chc-subtitle">${mode === "overview" ? "Heating at a glance" : mode === "schedule" ? "Plan and preview" : "How well the controller is learning"}</div></div><div class="chc-badge">${this._escape(this._statusLabel(status?.state))}</div></div>`;
-    let body = "";
+    const title = mode === "overview" ? this._config.title : mode === "schedule" ? "Comfort times" : "Learning";
+    const header = `<div class="chc-header"><div class="chc-title">${this._escape(title)}</div>${mode === "overview" ? `<span class="chc-activity">${this._escape(this._activityLabel())}</span>` : ""}</div>`;
+    let body;
     if (mode === "overview") {
-      const target = this._formatEntity(this._entities.effectiveTarget, this._formatNumber(attrs.effective_target_temperature));
-      const current = this._formatTemperature(attrs.current_temperature);
-      const arrival = this._formatTime(attrs.arrival_time);
-      const preheat = this._formatTime(this._state(this._entities.preheatStart)?.state || attrs.preheat_start_time);
-      const modeEntity = this._state(this._entities.controllerMode);
-      const modeState = modeEntity?.state;
-      const modeUnavailable = !modeEntity || ["unknown", "unavailable"].includes(modeState);
-      body = `<div class="chc-dashboard-controls"><div class="chc-overview-primary"><div><div class="chc-label">Current temperature</div><div class="chc-current-big">${this._escape(current)}</div></div><div><div class="chc-label">Current target</div><div class="chc-target">${this._escape(target)}</div></div></div>
-        <label class="chc-mode"><span class="chc-label">Heating mode</span><select data-mode aria-label="Heating mode" ${modeUnavailable ? "disabled" : ""}>${modeUnavailable ? "<option selected>Unavailable</option>" : ["auto", "away", "off"].map(value => `<option value="${value}" ${modeState === value ? "selected" : ""}>${this._titleCase(value)}</option>`).join("")}</select></label>
-        <div class="chc-actions"><button type="button" data-action="blast" class="chc-hot" ${this._state(this._entities.heatBlast) && modeState === "auto" ? "" : "disabled"}>Heat Blast</button></div></div>
-        ${this._renderDashboardForecast()}
-        <div class="chc-cost-grid">${this._renderCost("Estimated heating cost today", this._entities.heatingCostToday)}${this._renderCost("Estimated heating cost tomorrow", this._entities.heatingCostTomorrow)}</div>
-        <div class="chc-visual-grid">${arrival !== "Unavailable" ? this._renderMetric("Next arrival", arrival) : ""}${preheat !== "Unavailable" ? this._renderMetric("Pre-heat starts", preheat) : ""}</div>
-        ${this._renderReadiness(false)}
-        <p class="chc-forecast-note chc-dashboard-hint">${readiness.controlState === "active" ? "Intelligent heating is using the learned plan." : readiness.controlState === "fallback" ? "The existing schedule is in control." : readiness.controlState === "paused" ? readiness.explanation : "The schedule preview is for planning only. Use the Schedule dashboard view to review it."}</p>`;
+      const target = this._formatEntity(this._entities.effectiveTarget, this._formatTemperature(attrs.effective_target_temperature));
+      const forecast = this._state(this._entities.indoorTemperatureForecast);
+      const cost = [this._renderCost("Today", this._entities.heatingCostToday), this._renderCost("Tomorrow", this._entities.heatingCostTomorrow)].join("");
+      const historyEntity = attrs.climate_entity;
+      const progress = readiness.controlState === "active" ? "Automatic timing is on" : readiness.attrs.ready === true ? "Automatic timing is ready to enable" : "Automatic timing is still learning";
+      body = `<p class="chc-policy">${this._escape(this._policySummary())}</p><div class="chc-overview-primary"><div><div class="chc-label">Inside now</div><div class="chc-current-big">${this._escape(this._formatTemperature(attrs.current_temperature))}</div></div><div><div class="chc-label">Target now</div><div class="chc-target">${this._escape(target)}</div></div></div>
+        ${this._renderDashboardForecast()}${this._renderNextChanges()}${this._renderControlChoice()}
+        <div class="chc-now-links">${this._dashboardLink("schedule", "Change comfort times")}${historyEntity ? `<button type="button" class="chc-link-button" data-more-info="${this._escape(historyEntity)}">Past temperatures</button>` : ""}</div>
+        <p class="chc-progress-link">${this._dashboardLink("learning", `${progress} →`)}</p>
+        ${this._detail("costs", "Heating costs", `<div class="chc-cost-grid">${cost}</div><p>Heating only; hot water and the standing charge are excluded. Estimates need enough matched gas readings.</p>`)}
+        ${forecast?.attributes?.confidence === "learning" ? '<p class="chc-small-note">Temperature estimates are still improving as more readings arrive.</p>' : ""}`;
     } else if (mode === "schedule") {
-      const settingsAvailable = Boolean(plan && plan.attributes?.settings && typeof plan.attributes.settings === "object"
-        && Object.keys(plan.attributes.settings).length);
-      const planActive = plan?.state === "active" && plan.attributes?.preview === false;
-      const existingForecast = this._state(this._entities.indoorTemperatureForecast);
-      const showingPlan = readiness.controlState === "fallback"
-        ? Array.isArray(existingForecast?.attributes?.forecast) && existingForecast.attributes.forecast.length > 1
-        : previewReady || planActive;
-      const switchOn = readiness.control?.state === "on";
-      const controlUnavailable = !readiness.control || ["unknown", "unavailable"].includes(readiness.control.state);
-      const canEnable = !readiness.unavailable && readiness.attrs.ready === true && readiness.mode === "auto" && !controlUnavailable;
-      const buttonLabel = switchOn ? readiness.controlState === "paused" ? "Disable intelligent heating" : "Return to existing schedule" : "Enable intelligent heating";
-      const buttonDisabled = switchOn ? controlUnavailable : !canEnable;
-      const previewState = plan?.state === "unavailable" || plan?.state === "unknown"
-        ? "The preview is unavailable. Check the integration and its configured forecast inputs."
-        : !plan ? "Update the integration and restart Home Assistant to enable schedule previews."
-          : !previewReady && !planActive ? "Schedule preview is disabled in the integration options." : "";
-      const planHeading = readiness.controlState === "active" ? "Intelligent heating plan"
-        : readiness.controlState === "fallback" ? "Existing schedule in control"
-          : readiness.controlState === "paused" ? "Intelligent heating paused"
-            : previewReady ? "Preview only" : readiness.controlState === "unknown" ? "Plan status unavailable" : "Preview only";
-      const planHint = readiness.controlState === "active" ? "Intelligent heating is using this plan. Changes to comfort temperature update the live High setting."
-        : readiness.controlState === "fallback" ? "The existing schedule is controlling heating."
-          : readiness.controlState === "paused" ? readiness.explanation
-            : readiness.controlState === "unknown" && !previewReady ? readiness.explanation
-              : "Preview — the existing schedule controls heating.";
-      body = `${this._renderReadiness("collapsed")}<div class="chc-smart-action"><button type="button" data-action="smart-control:${switchOn ? "off" : "on"}" ${buttonDisabled || this._smartControlPending ? "disabled" : ""}>${this._smartControlPending ? (switchOn ? "Returning…" : "Enabling…") : buttonLabel}</button><span role="status">${this._escape(this._smartControlMessage)}</span></div>
-        <section class="chc-preview" aria-label="${readiness.controlState === "active" ? "Intelligent heating plan" : readiness.controlState === "fallback" ? "Existing schedule forecast" : readiness.controlState === "unknown" && !previewReady ? "Plan status unavailable" : "Schedule preview"}"><div class="chc-preview-heading"><strong>${planHeading}</strong><span>${readiness.controlState === "active" ? "Controls heating" : readiness.controlState === "fallback" ? "Existing schedule controls heating" : readiness.controlState === "paused" ? "Heating mode or override is in control" : readiness.controlState === "unknown" && !previewReady ? "Check the integration before enabling" : "Does not control heating"}</span></div>${showingPlan ? `${readiness.controlState === "fallback" ? "" : plan.attributes?.explanation ? `<div class="chc-forecast-note">${this._escape(plan.attributes.explanation)}</div>` : ""}${this._renderForecast(false, readiness.controlState === "fallback" ? this._entities.indoorTemperatureForecast : this._entities.smartHeatingPlan, readiness.controlState === "paused" || readiness.controlState === "unknown" ? "preview" : readiness.controlState)}` : `<div class="chc-forecast-note">${this._escape(readiness.controlState === "fallback" ? readiness.attrs.fallback_reason || plan?.attributes?.explanation || "The existing schedule is in control." : readiness.controlState === "paused" ? readiness.explanation : plan?.attributes?.explanation || previewState || readiness.explanation)}</div>`}</section>
-        <div class="chc-setpoints">${this._renderNumberControl("Comfort temperature", this._entities.highTemperature)}</div><p class="chc-forecast-note chc-dashboard-hint">${readiness.controlState === "active" ? "Comfort temperature also changes the live High setting. Schedule times and night settings are used by intelligent heating." : readiness.controlState === "fallback" ? "Comfort temperature also changes the live High setting. Existing schedule controls heating while intelligent heating is in fallback." : "Comfort temperature also changes the High setting used by your current heating schedule. The times and allowance below affect the preview only."}</p>${settingsAvailable ? this._renderScheduleEditor(plan.attributes.settings, readiness.controlState) : `<p class="chc-forecast-note chc-dashboard-hint">Schedule editing is unavailable. Check the integration options.</p>`}<p class="chc-forecast-note chc-dashboard-hint">${planHint}</p>`;
+      const settings = plan?.attributes?.settings;
+      const available = settings && typeof settings === "object" && Object.keys(settings).length;
+      const paused = readiness.controlState === "paused";
+      const note = paused ? `${this._policySummary()} ${readiness.control?.state === "on" ? "These times will be used when automatic timing resumes." : "These times prepare automatic timing; enable it later from Learning."}` : readiness.controlState === "active" ? "Automatic timing uses these comfort times now. It chooses when to start warming the house."
+        : readiness.controlState === "fallback" ? "Your existing schedule is running. These times are saved for automatic timing when it can safely resume."
+          : "Your existing schedule still runs the heating. These times prepare automatic timing; they will not take over until you enable it.";
+      body = `<p class="chc-intro">Choose when you want the house warm. We learn how early the heating needs to start.</p><p class="chc-policy">${this._escape(note)}</p>
+        <div class="chc-setpoints">${this._renderNumberControl("Comfort temperature", this._entities.highTemperature)}</div><p class="chc-small-note">This temperature is shared with your existing heating schedule.</p>
+        ${available ? this._renderScheduleEditor(settings, readiness.controlState) : '<p class="chc-empty">Comfort-time settings are unavailable. Check the integration.</p>'}
+        ${this._detail("preview", readiness.controlState === "active" ? "See the automatic temperature plan" : "See the automatic timing preview", `<p>${readiness.controlState === "active" ? "This plan is controlling heating, unless you select Away, Off or a manual temperature." : "This is a proposed plan. The graph on Now shows what your heating is actually expected to do."}</p>${this._renderDashboardForecast(this._entities.smartHeatingPlan, true)}`)}
+        <p class="chc-progress-link">${this._dashboardLink("learning", readiness.attrs.ready === true ? "Ready to enable automatic timing →" : "See what automatic timing still needs to learn →")}</p>`;
     } else {
       const forecast = this._state(this._entities.indoorTemperatureForecast)?.attributes || {};
       const unit = forecast.temperature_unit || "°C";
       const accuracy = ["1h", "6h", "24h"].map(h => {
-        const item = forecast.forecast_accuracy?.[h] || {};
+        const item = readiness.attrs.recent_accuracy?.[h] || forecast.forecast_accuracy?.[h] || {};
         const error = this._finiteNumber(item.mae_c), count = this._finiteNumber(item.count);
-        return this._renderMetric(`${h} forecast accuracy`, error !== null && error >= 0 ? `${this._formatNumber(unit === "°F" ? error * 1.8 : error, unit)} mean absolute error · ${count ?? 0} readings` : "No readings yet");
+        const value = error !== null && error >= 0 && count > 0 ? `${this._formatNumber(unit === "°F" ? error * 1.8 : error, unit)} average error` : "Waiting for readings";
+        return this._renderMetric(`${h === "1h" ? "1 hour" : h === "6h" ? "6 hours" : "24 hours"} ahead`, value);
       }).join("");
-      const samples = this._finiteNumber(forecast.learned_samples ?? attrs.learned_samples);
-      const response = forecast.heating_response_learned === true && this._finiteNumber(forecast.heating_response_minutes) !== null
-        ? this._formatNumber(forecast.heating_response_minutes, "min") : "Still learning";
-      const rate = this._formatEntity(this._entities.learnedRate);
+      const heading = readiness.controlState === "active" ? "Automatic timing is on" : readiness.unavailable ? "Learning information unavailable" : readiness.attrs.ready === true ? "Ready to use automatic timing" : "Still learning your home";
+      const needs = this._learningNeeds();
+      const response = forecast.heating_response_learned === true ? this._formatNumber(forecast.heating_response_minutes, "min") : "Still learning";
       const cost = this._state(this._entities.heatingCostToday)?.attributes?.calibration;
-      const delayConfidence = forecast.heating_response_learned === true
-        ? "Delay estimate is in use" : "Delay estimate is still being learnt";
-      const demandConfidence = forecast.demand_model_learned === true
-        ? "Heating demand estimate is established" : "Heating demand estimate is still being learnt";
-      body = `${this._renderReadiness("open")}<div class="chc-learning-grid">${accuracy}${this._renderMetric("Heating samples", samples === null ? "No samples yet" : String(samples))}${this._renderMetric("Heating response delay", `${response} · ${delayConfidence}`)}${this._renderMetric("Heating demand", demandConfidence)}${this._renderMetric("Learned heating rate", rate)}${this._renderMetric("Demand readings collected", cost?.observation_count != null ? String(cost.observation_count) : "No readings yet")}${this._renderMetric("Gas intervals matched", cost?.sample_count ? `${cost.sample_count} intervals` : "No matched intervals yet")}</div><p class="chc-forecast-note chc-dashboard-hint">Mean absolute error is the average distance between a forecast and the measured temperature. Lower is better. These checks describe the live heating schedule and intelligent heating requirements.</p>`;
+      const technical = `${this._renderReadiness("open")}<div class="chc-learning-grid">${this._renderMetric("Temperature samples", String(forecast.learned_samples ?? "Waiting"))}${this._renderMetric("Heating response time", response)}${this._renderMetric("Matched gas readings", String(cost?.sample_count ?? 0))}</div>`;
+      body = `<section class="chc-learning-summary"><h2>${heading}</h2><p>${this._escape(this._policySummary())}</p>${readiness.controlState === "active" ? '<p>The safety checks have passed. You can return to your existing schedule at any time.</p>' : readiness.attrs.ready === true ? readiness.controlState === "paused" ? '<p>Return to Auto and end any temporary override before enabling automatic timing.</p>' : '<p>The checks have passed. Automatic timing starts only when you enable it.</p>' : `<h3>What is still needed</h3><ul>${needs.map(need => `<li>${this._escape(need)}</li>`).join("")}</ul>`}</section>${this._renderSmartAction()}
+        <section class="chc-accuracy-summary"><h3>How close were the forecasts?</h3><p>Compared with measured indoor temperatures. Smaller errors are better.</p><div class="chc-learning-grid">${accuracy}</div></section>
+        ${this._detail("checks", "Detailed learning and safety checks", technical)}
+        ${this._detail("planning", "Planning settings", `<label class="chc-enable"><input type="checkbox" data-planning-enabled ${this._planningPending ? "disabled" : ""} ${plan?.attributes?.settings?.enabled === true ? "checked" : ""}> Prepare automatic heating plans</label><p>Turning planning off keeps your existing schedule in control.</p><span role="status">${this._escape(this._planningMessage || "")}</span>`)}
+        ${readiness.controlState === "fallback" && readiness.attrs.fallback_reason ? `<p class="chc-small-note">${this._escape(readiness.attrs.fallback_reason)}</p>` : ""}`;
     }
     this.shadowRoot.innerHTML = `<style>${this._styles()}</style><ha-card class="chc-card chc-dashboard chc-dashboard-${mode}">${header}${body}</ha-card>`;
     this._bindActions();
@@ -567,10 +755,8 @@ class CentralHeatingControllerCard extends HTMLElement {
     }
   }
 
-  _renderDashboardForecast() {
-    const forecast = this._state(this._entities.indoorTemperatureForecast);
-    const early = forecast?.attributes?.confidence !== "learned";
-    return `<section class="chc-forecast" aria-label="Live heating forecast"><div class="chc-section-title">Next 24 hours</div>${early ? '<p class="chc-forecast-state is-learning">Early estimate — still learning your home.</p>' : ""}${this._renderForecast(true)}<p class="chc-forecast-note">Shaded areas show when heating is expected. The dashed line is the target temperature.</p></section>`;
+  _renderDashboardForecast(entityId = this._entities.indoorTemperatureForecast, preview = false) {
+    return `<section class="chc-forecast chc-simple-forecast" aria-label="${preview ? "Automatic timing preview" : "Live heating forecast"}"><div class="chc-section-title">Next 24 hours</div>${this._renderForecast(true, entityId, "simple")}<p class="chc-forecast-note">Shading shows when heating is likely to be needed.</p></section>`;
   }
 
   _renderCost(label, entityId) {
@@ -783,23 +969,15 @@ class CentralHeatingControllerCard extends HTMLElement {
   _buildForecast(compact = false, entityId = this._entities.indoorTemperatureForecast, presentation = "forecast") {
     const state = this._state(entityId);
     const attrs = state?.attributes || {};
-    const rows = Array.isArray(attrs.forecast) ? attrs.forecast
-      .filter((point) => point && typeof point === "object")
-      .map((point) => ({
-        time: new Date(point.datetime).getTime(),
-        temperature: this._finiteNumber(point.temperature),
-        target: this._finiteNumber(point.target_temperature),
-        demand: this._finiteNumber(point.heating_demand_percent),
-      }))
-      .filter((point) => Number.isFinite(point.time) && point.temperature !== null)
-      .sort((a, b) => a.time - b.time) : [];
+    const rows = this._forecastRows(entityId);
     const unit = attrs.temperature_unit || "°C";
     const confidence = attrs.confidence;
     const reason = attrs.reason;
     let content;
 
     if (rows.length) {
-      const width = 600, height = 220, left = 48, right = 12, top = 12, bottom = 34;
+      const width = 600, height = presentation === "simple" ? 260 : 220;
+      const left = presentation === "simple" ? 64 : 48, right = 12, top = 12, bottom = presentation === "simple" ? 42 : 34;
       const times = rows.map((p) => p.time);
       const values = rows.flatMap((p) => p.target === null ? [p.temperature] : [p.temperature, p.target]);
       const tMin = times[0], tMax = times[times.length - 1] || tMin + 1;
@@ -846,7 +1024,7 @@ class CentralHeatingControllerCard extends HTMLElement {
       const axisTick = (time, includeDay = false) => {
         const date = new Date(time);
         const formats = this._dateFormatters();
-        const label = formats.time.format(date);
+        const label = this._timeLabel(date);
         const day = formats.day.format(date);
         const previousDay = formats.day.format(new Date(time - interval));
         const tickLabel = includeDay || day !== previousDay ? `${day} ${label}` : label;
@@ -866,7 +1044,7 @@ class CentralHeatingControllerCard extends HTMLElement {
           <desc id="chc-chart-desc">Predicted indoor temperature and target temperature, in ${this._escape(unit)}, from ${this._escape(first)} to ${this._escape(last)} local time.</desc>
           <g class="chc-chart-bands">${heatingBands}</g><g class="chc-chart-temperature-ticks">${ticks}</g><g class="chc-chart-time-ticks">${timeTicks.join("")}</g>
           <path d="${pathFor("temperature")}" class="chc-chart-line chc-chart-indoor"/><path d="${pathFor("target", true)}" class="chc-chart-line chc-chart-target"/>
-        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${presentation === "active" ? "Plan temperature" : presentation === "fallback" ? "Existing schedule" : presentation === "preview" ? "Proposed plan" : compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span><span><i class="chc-legend-heating"></i>Heating expected</span></div>
+        </svg><div class="chc-chart-legend"><span><i class="chc-legend-indoor"></i>${presentation === "simple" ? "Expected temperature" : presentation === "active" ? "Plan temperature" : presentation === "fallback" ? "Existing schedule" : presentation === "preview" ? "Proposed plan" : compact ? "Forecast" : "Indoor forecast"}</span><span><i class="chc-legend-target"></i>Target</span><span><i class="chc-legend-heating"></i>${presentation === "simple" ? "Heating likely" : "Heating expected"}</span></div>
       </div>`;
     } else if (confidence === "learning") {
       content = `<div class="chc-forecast-state">${this._escape(reason || "Learning your home’s heating response. A forecast will appear when enough data is available.")}</div>`;
@@ -996,6 +1174,21 @@ class CentralHeatingControllerCard extends HTMLElement {
     }
     const mode = this.shadowRoot.querySelector("[data-mode]");
     if (mode) mode.addEventListener("change", (event) => this._selectControllerMode(event.target.value));
+    for (const input of this.shadowRoot.querySelectorAll("[data-schedule-source]")) {
+      input.addEventListener("change", event => this._setScheduleSource(event.target.value));
+    }
+    for (const details of this.shadowRoot.querySelectorAll("[data-detail]")) {
+      details.addEventListener("toggle", event => {
+        if (!event.target.isConnected) return;
+        if (event.target.open) this._openDetails.add(details.dataset.detail);
+        else this._openDetails.delete(details.dataset.detail);
+      });
+    }
+    for (const button of this.shadowRoot.querySelectorAll("[data-more-info]")) {
+      button.addEventListener("click", () => this._showMoreInfo(button.dataset.moreInfo));
+    }
+    const planning = this.shadowRoot.querySelector("[data-planning-enabled]");
+    if (planning) planning.addEventListener("change", event => this._setPlanningEnabled(event.target.checked));
     for (const input of this.shadowRoot.querySelectorAll("[data-draft-path]")) {
       const update = event => this._updateScheduleDraft(input.dataset.draftPath,
         input.type === "checkbox" ? event.target.checked : event.target.value);
@@ -1014,6 +1207,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     return `
       :host { display: block; }
       .chc-card {
+        display: block;
         overflow: hidden;
         color: var(--primary-text-color, #1f2933);
         background: var(--ha-card-background, var(--card-background-color, #fff));
@@ -1305,6 +1499,124 @@ class CentralHeatingControllerCard extends HTMLElement {
         .chc-setpoints { grid-template-columns: 1fr; }
         .chc-stages,
         .chc-visual-grid { grid-template-columns: 1fr; }
+      }
+      .chc-dashboard { padding-bottom: 12px; }
+      .chc-dashboard .chc-header { align-items: center; border: 0; padding: 22px 24px 8px; }
+      .chc-dashboard .chc-title { font-size: 23px; font-weight: 650; }
+      .chc-activity { color: var(--secondary-text-color, #667085); font-size: 13px; }
+      .chc-policy { margin: 0; padding: 4px 24px 14px; color: var(--secondary-text-color, #667085); font-size: 14px; line-height: 1.5; }
+      .chc-intro { margin: 4px 24px 12px; font-size: 17px; line-height: 1.5; max-width: 720px; }
+      .chc-dashboard .chc-overview-primary { padding: 8px 24px 22px; grid-template-columns: 1fr 1fr; max-width: 650px; }
+      .chc-dashboard .chc-current-big { font-size: 44px; font-weight: 650; }
+      .chc-dashboard .chc-target { font-size: 36px; font-weight: 550; }
+      .chc-dashboard .chc-label { font-size: 13px; }
+      .chc-dashboard .chc-simple-forecast { padding: 0 24px 8px; }
+      .chc-simple-forecast .chc-section-title { font-size: 14px; font-weight: 600; }
+      .chc-dashboard .chc-chart { max-height: 330px; }
+      .chc-dashboard .chc-chart-legend { font-size: 12px; gap: 12px; }
+      .chc-dashboard .chc-chart-line { stroke-width: 3; }
+      .chc-dashboard .chc-chart-line { vector-effect: non-scaling-stroke; stroke-width: 2.5; }
+      .chc-dashboard .chc-forecast-note { font-size: 12px; margin-top: 7px; }
+      .chc-next { margin: 8px 24px 18px; border-top: 1px solid var(--divider-color, #ddd); padding-top: 16px; }
+      .chc-next h3, .chc-accuracy-summary h3 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+      .chc-next ul { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0; padding: 0; list-style: none; }
+      .chc-next li { display: grid; gap: 5px; font-size: 14px; line-height: 1.5; }
+      .chc-next li strong { font-weight: 600; }
+      .chc-next li span { color: var(--secondary-text-color, #667085); font-size: 13px; }
+      .chc-quick-controls { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; padding: 0 24px 12px; }
+      .chc-quick-controls label { display: grid; gap: 5px; font-size: 12px; color: var(--secondary-text-color, #667085); }
+      .chc-quick-controls select, .chc-quick-controls button, .chc-timetable button, .chc-schedule-footer button { min-height: 44px; padding: 9px 14px; border: 1px solid var(--divider-color, #bbb); border-radius: 8px; color: var(--primary-text-color, #1f2933); background: var(--card-background-color, #fff); font: inherit; cursor: pointer; }
+      .chc-quick-controls select { min-width: 150px; font-size: 15px; }
+      .chc-quick-controls button { font-size: 14px; }
+      .chc-quick-message { width: 100%; font-size: 13px; }
+      .chc-quick-message:empty { display: none; }
+      .chc-now-links { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0 24px; align-items: center; }
+      .chc-text-link, .chc-link-button { color: var(--primary-color, #007ba8); font-size: 14px; text-decoration: none; line-height: 1.5; }
+      .chc-link-button { background: none; border: 0; padding: 10px 0; cursor: pointer; font-family: inherit; min-height: 44px; }
+      .chc-text-link:hover, .chc-link-button:hover { text-decoration: underline; }
+      .chc-progress-link { margin: 10px 24px 16px; padding-top: 12px; border-top: 1px solid var(--divider-color, #ddd); }
+      .chc-small-note { margin: 0 24px 15px; color: var(--secondary-text-color, #667085); font-size: 12px; line-height: 1.5; }
+      .chc-disclosure { margin: 0 24px 12px; border-top: 1px solid var(--divider-color, #ddd); }
+      .chc-disclosure > summary { padding: 13px 0; cursor: pointer; font-size: 14px; font-weight: 600; min-height: 44px; }
+      .chc-disclosure-body { padding-bottom: 12px; }
+      .chc-disclosure-body > p, .chc-night-fields > p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--secondary-text-color, #667085); }
+      .chc-disclosure-body .chc-cost-grid { padding: 0; }
+      .chc-disclosure .chc-readiness, .chc-disclosure .chc-learning-grid { margin-inline: 0; }
+      .chc-dashboard-schedule .chc-setpoints { padding: 5px 24px 10px; max-width: 650px; }
+      .chc-dashboard .chc-stepper button { width: 44px; height: 44px; min-height: 44px; font-size: 20px; }
+      .chc-dashboard .chc-number { background: transparent; }
+      .chc-dashboard .chc-number-value { font-size: 24px; }
+      .chc-dashboard .chc-schedule-editor { margin: 0 24px 20px; border: 0; border-top: 1px solid var(--divider-color, #ddd); border-radius: 0; }
+      .chc-dashboard .chc-schedule-editor > summary { padding: 17px 0; font-size: 17px; font-weight: 600; }
+      .chc-dashboard .chc-schedule-editor form { display: block; padding: 0; }
+      .chc-source-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; border: 0; margin: 0 0 15px; padding: 0; }
+      .chc-source-choice legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+      .chc-source-choice label { display: flex; align-items: center; gap: 9px; padding: 12px; min-height: 48px; border: 1px solid var(--divider-color, #bbb); border-radius: 8px; font-size: 14px; cursor: pointer; }
+      .chc-source-choice label:has(input:checked) { border-color: var(--primary-color, #007ba8); background: color-mix(in srgb, var(--primary-color, #007ba8) 6%, transparent); }
+      .chc-source-choice input { accent-color: var(--primary-color, #007ba8); width: 18px; height: 18px; margin: 0; flex: 0 0 auto; }
+      .chc-timetable > p { font-size: 14px; line-height: 1.5; margin: 0 0 14px; }
+      .chc-inherited-week { display: grid; gap: 0; margin: 0 0 12px; }
+      .chc-inherited-week > div { display: grid; grid-template-columns: 105px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--divider-color, #ddd); font-size: 14px; line-height: 1.5; }
+      .chc-inherited-week strong { font-weight: 550; }
+      .chc-inherited-week span { color: var(--secondary-text-color, #667085); }
+      .chc-schedule-day { border: 0; border-bottom: 1px solid var(--divider-color, #ddd); border-radius: 0; padding: 0; }
+      .chc-schedule-day > summary { display: grid; grid-template-columns: 105px 1fr auto; gap: 10px; align-items: center; min-height: 48px; padding: 10px 0; font-size: 14px; cursor: pointer; }
+      .chc-schedule-day > summary strong { font-weight: 550; }
+      .chc-schedule-day > summary span { color: var(--secondary-text-color, #667085); }
+      .chc-schedule-day > summary .chc-day-edit { color: var(--primary-color, #007ba8); font-size: 12px; }
+      .chc-day-fields { padding: 8px 0 14px; }
+      .chc-period input { min-height: 44px; font-size: 15px; }
+      .chc-period button, .chc-add { min-height: 44px; }
+      .chc-schedule-editor .chc-disclosure { margin: 16px 0 0; }
+      .chc-summary-value { display: block; padding: 5px 0 0 15px; color: var(--secondary-text-color, #667085); font-size: 12px; font-weight: 400; }
+      .chc-night-fields .chc-period { grid-template-columns: 1fr 1fr; }
+      .chc-schedule-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 18px 0 10px; }
+      .chc-schedule-footer button { background: var(--primary-color, #007ba8); color: white; border: 0; font-weight: 600; }
+      .chc-schedule-footer span { color: var(--secondary-text-color, #667085); font-size: 13px; }
+      .chc-schedule-hint { font-size: 12px; line-height: 1.5; }
+      .chc-learning-summary { padding: 4px 24px 12px; }
+      .chc-learning-summary h2 { font-size: 20px; font-weight: 600; margin: 4px 0 12px; }
+      .chc-learning-summary h3 { font-size: 15px; margin: 18px 0 8px; }
+      .chc-learning-summary p, .chc-learning-summary li { font-size: 14px; line-height: 1.65; }
+      .chc-learning-summary p { margin: 0 0 8px; }
+      .chc-learning-summary ul { padding-left: 20px; margin: 0 0 4px; }
+      .chc-learning-summary li { margin-bottom: 7px; }
+      .chc-dashboard-learning .chc-smart-action { margin: 0 24px 22px; }
+      .chc-accuracy-summary { margin: 0 24px 20px; }
+      .chc-accuracy-summary > p { color: var(--secondary-text-color, #667085); font-size: 13px; line-height: 1.5; }
+      .chc-accuracy-summary .chc-learning-grid { padding: 0; grid-template-columns: repeat(3,1fr); }
+      .chc-dashboard-learning .chc-metric { padding: 12px; }
+      .chc-dashboard-learning .chc-metric-value { font-size: 16px; }
+      .chc-empty { margin: 18px 24px; color: var(--secondary-text-color, #667085); line-height: 1.5; }
+      .chc-dashboard :is(button,select,input,a,summary):focus-visible { outline: 3px solid var(--primary-color, #007ba8); outline-offset: 3px; }
+      @media (min-width: 850px) {
+        .chc-dashboard { max-width: 1060px; }
+        .chc-dashboard .chc-chart { max-height: 310px; }
+        .chc-inherited-week { grid-template-columns: 1fr 1fr; gap: 0 32px; }
+      }
+      @media (max-width: 550px) {
+        .chc-dashboard .chc-header { padding: 18px 18px 8px; }
+        .chc-dashboard .chc-title { font-size: 21px; }
+        .chc-activity { font-size: 12px; max-width: 130px; text-align: right; }
+        .chc-dashboard .chc-policy { padding-inline: 18px; }
+        .chc-dashboard .chc-overview-primary { padding: 4px 18px 20px; }
+        .chc-dashboard .chc-current-big { font-size: 36px; }
+        .chc-dashboard .chc-target { font-size: 30px; }
+        .chc-dashboard .chc-simple-forecast { padding-inline: 10px; }
+        .chc-dashboard .chc-chart { font-size: 17px; }
+        .chc-next { margin: 6px 18px 16px; }
+        .chc-next ul { grid-template-columns: 1fr; gap: 12px; }
+        .chc-quick-controls { padding-inline: 18px; gap: 9px; }
+        .chc-now-links, .chc-progress-link, .chc-disclosure, .chc-small-note, .chc-accuracy-summary { margin-inline: 18px; }
+        .chc-intro { margin-inline: 18px; font-size: 16px; }
+        .chc-dashboard-schedule .chc-setpoints { padding-inline: 18px; }
+        .chc-dashboard .chc-schedule-editor { margin-inline: 18px; }
+        .chc-source-choice { grid-template-columns: 1fr; }
+        .chc-schedule-day > summary { grid-template-columns: 80px 1fr auto; font-size: 13px; gap: 7px; }
+        .chc-schedule-day > summary span { overflow-wrap: anywhere; }
+        .chc-learning-summary { padding-inline: 18px; }
+        .chc-dashboard-learning .chc-smart-action { margin-inline: 18px; }
+        .chc-accuracy-summary .chc-learning-grid { grid-template-columns: 1fr; }
       }
     `;
   }

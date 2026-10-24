@@ -692,6 +692,11 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     def _climate_state(self) -> State | None:
         return self.hass.states.get(self.config[CONF_CLIMATE])
 
+    def current_heating_demand_percent(self) -> float | None:
+        """Return the fresh, validated heating-activity signal as a percentage."""
+        demand = self._heating_demand(self._climate_state())
+        return round(float(demand) * 100, 1) if demand is not None else None
+
     @staticmethod
     def _available(state: State | None) -> bool:
         return state is not None and state.state not in _INVALID_STATE_VALUES
@@ -1493,7 +1498,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     async def _async_smart_preview(self, now, state, occupied, journey_home) -> dict:
         """Simulate proposed targets separately from every live control decision."""
         settings = self.smart_settings()
-        base = {"settings": settings, "preview": True, "forecast": [], "state": "disabled"}
+        schedule_entity = self.config[CONF_SCHEDULE]
+        base = {"settings": settings, "preview": True, "forecast": [], "state": "disabled",
+                "schedule_entity": schedule_entity,
+                "existing_schedule": self.forecast_inputs.cached_schedule(schedule_entity)}
         if not settings["enabled"] or self.controller_mode == "off":
             self._smart_target = None
             return base | {"explanation": "Schedule preview is disabled"}

@@ -74,7 +74,7 @@ def evaluate_readiness(
         "model_score",
         "Heating and cooling coverage",
         model_score is not None and 0.5 <= model_score <= 1.0,
-        f"Coverage score {model_score:.2f} (valid range 0.50–1.00)." if model_score is not None else "Coverage score is missing or invalid; it must be between 0.50 and 1.00.",
+        f"Coverage score {model_score:.3f} (valid range 0.500–1.000)." if model_score is not None else "Coverage score is missing or invalid; it must be between 0.50 and 1.00.",
     )
     delay_learned = isinstance(forecast, dict) and forecast.get("heating_response_learned") is True
     demand_learned = isinstance(forecast, dict) and forecast.get("demand_model_learned") is True

@@ -75,6 +75,20 @@ async def test_default_preview_never_applies_ready_plan(hass, environment):
     assert coordinator.data.smart_plan["preview"] is True
 
 
+async def test_smart_plan_exposes_configured_schedule_entity_and_cached_timetable(hass, environment):
+    coordinator = await controller(hass)
+    coordinator.forecast_inputs._cache[("schedule", "schedule.heating")] = (
+        0,
+        {"monday": [{"from": "06:30:00", "to": "08:00:00", "data": {"temperature": 21}}]},
+    )
+
+    plan = await coordinator._async_smart_preview(NOW, coordinator.data, True, False)
+
+    assert plan["schedule_entity"] == "schedule.heating"
+    assert plan["existing_schedule"]["monday"] == [{"start": "06:30", "end": "08:00"}]
+    assert "data" not in plan["existing_schedule"]["monday"][0]
+
+
 async def test_opted_in_ready_controller_sends_only_smart_target_and_scores_it(hass, environment):
     coordinator = await controller(hass, enabled=True)
     ready_pipeline(coordinator)

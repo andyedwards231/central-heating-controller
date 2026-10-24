@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.8.0 — 2026-10-24
+
+Simplifies the Heating dashboard into **Now**, **Comfort times** and **Learning**.
+Now puts the indoor temperature, current target and 24-hour graph first, names
+what currently controls heating, and summarises the next predicted heating period
+and target change. Estimated heating is shaded. Past temperatures opens the
+thermostat's Home Assistant history; costs are in a collapsed section.
+
+Comfort times explicitly offers **Use my existing schedule** or **Set comfort
+times here**, displays the inherited weekly timetable, and explains that users
+choose when warmth is wanted while automatic timing learns when to start heating.
+The future plan is behind a preview disclosure, and saved custom times never
+silently enable live control. Night settings and daytime allowance are collapsed.
+
+Learning shows a short, plain-language list of remaining needs and measured
+forecast errors. Full diagnostics remain available under detailed checks. Opt-in
+moves here as **Enable automatic timing**, retaining all backend safety checks
+and requiring Auto with no temporary override. New drafts made while saving are
+preserved, service errors stay inline, and repeated clock-change hours include
+their time zone. A near-threshold coverage score no longer rounds to a misleading
+passing value.
+
+The backend adds the configured thermostat, schedule and validated activity
+metadata plus a sanitised cached timetable for display. Heating policy, learning
+history and the kiosk card's rendering behaviour are preserved.
+
+Update through HACS and restart Home Assistant for the timetable/history metadata.
+Replace the dashboard JavaScript with the attached file and update the resource
+URL to `/local/central-heating-controller-card.js?v=1.8.0`. The attached `heating.yaml`
+renames the three tabs; existing mode names and URL paths remain compatible.
+Automatic timing remains off unless explicitly enabled after readiness.
+
+Validated with 537 Python tests, 69 JavaScript tests and desktop/phone browser
+checks, including keyboard period editing and simulated save failures.
+
 ## 1.7.1 — 2026-10-24
 
 Fixes temperature and schedule edits briefly making the dashboard unavailable.

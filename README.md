@@ -384,9 +384,13 @@ separate checks against actual indoor temperatures.
 
 The smart schedule starts in **preview only**. It does not change the targets
 sent to your thermostat: the existing Home Assistant schedule remains in
-control. The main card shows a separate proposed 24-hour temperature curve and
-shades expected heating. Open **Schedule and night settings** to edit weekly
-comfort periods, night times, the night minimum and the maximum daytime drop.
+control. The Heating dashboard has **Now**, **Comfort times** and **Learning**
+views. Now shows the expected temperatures and heating for the policy actually
+running. Comfort times makes the timetable source explicit: reuse the existing
+Home Assistant schedule, or enter your own warmth periods. Its proposed automatic
+plan is in a collapsed preview. Night settings and daytime allowance are separate
+from the weekly periods. Users choose their routine; learning chooses the heating
+start time, rather than guessing when warmth is wanted.
 Your High temperature is the comfort target; periods mean **warm by** the start,
 with comfort maintained until the end. With no weekly periods set, preview uses
 your existing schedule helper. Night defaults to 23:00–07:00 and 16°C; the
@@ -439,9 +443,10 @@ see [card installation](docs/lovelace-card.md).
 ### Readiness and opt-in live control
 
 `sensor.central_heating_controller_smart_heating_readiness` explains each learning
-and safety requirement. Overview shows the current control state; Schedule has a
-collapsible checklist and **Enable intelligent heating** button; Learning shows
-the complete checklist. There is no automatic first activation. The separate
+and safety requirement. Now shows the current control state. Learning explains
+what is still needed in plain language and offers **Enable automatic timing**
+only after the requirements pass; the full checklist is in **Detailed learning
+and safety checks**. There is no automatic first activation. The separate
 `switch.central_heating_controller_smart_heating_control` defaults to off,
 rejects enabling while unready or outside Auto, and persists explicit consent.
 

@@ -72,6 +72,23 @@ def _time(value: object) -> time | None:
     return None
 
 
+def _schedule_response(value: object) -> dict | None:
+    """Unwrap the response forms returned by Home Assistant Schedule."""
+    if not isinstance(value, dict):
+        return None
+    if len(value) == 1 and isinstance(value.get("response"), dict):
+        value = value["response"]
+    return value if any(day in value for day in _WEEKDAYS) else None
+
+
+def _display_time(value: object) -> str | None:
+    """Format a validated schedule time, retaining the explicit 24:00 end."""
+    if value in ("24:00", "24:00:00") or value == time.max:
+        return "24:00"
+    parsed = _time(value)
+    return parsed.strftime("%H:%M") if parsed is not None else None
+
+
 @dataclass(frozen=True)
 class ForecastInputsResult:
     """Validated callable inputs, or a reason explaining why forecasting is unavailable."""
@@ -108,6 +125,34 @@ class ForecastInputs:
         self._failed_at.pop(key, None)
         self._failure.pop(key, None)
         self.revision += 1
+
+    def cached_schedule(self, entity_id: str) -> dict[str, list[dict[str, str]]] | None:
+        """Return a safe, start/end-only view of the last successful schedule response."""
+        cached = self._cache.get(("schedule", entity_id))
+        if cached is None:
+            return None
+        raw_response = cached[1]
+        if isinstance(raw_response, dict) and isinstance(raw_response.get(entity_id), dict):
+            raw_response = raw_response[entity_id]
+        response = _schedule_response(raw_response)
+        if response is None:
+            return None
+        result: dict[str, list[dict[str, str]]] = {day: [] for day in _WEEKDAYS}
+        for day in _WEEKDAYS:
+            rows = response.get(day, [])
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if not isinstance(row, dict):
+                    return None
+                start, end = row.get("from"), row.get("to")
+                parsed_start, parsed_end = _time(start), _time(end)
+                start_text, end_text = _display_time(start), _display_time(end)
+                if (parsed_start is None or parsed_end is None or parsed_end <= parsed_start
+                        or start_text is None or end_text is None):
+                    return None
+                result[day].append({"start": start_text, "end": end_text})
+        return result
 
     async def _service(
         self, domain: str, service: str, entity_id: str, data: dict[str, object]
@@ -258,13 +303,8 @@ class ForecastInputs:
     def _schedule_callable(self, response: object):
         if not isinstance(response, dict):
             raise ValueError("Schedule service returned malformed data")
-        if (
-            isinstance(response, dict)
-            and len(response) == 1
-            and isinstance(response.get("response"), dict)
-        ):
-            response = response["response"]
-        if not any(day in response for day in _WEEKDAYS):
+        response = _schedule_response(response)
+        if response is None:
             raise ValueError("Schedule service returned no weekday data")
         blocks: dict[int, list[tuple[time, time]]] = {}
         for day_index, day in enumerate(_WEEKDAYS):

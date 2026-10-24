@@ -2,7 +2,7 @@
 
 The repository includes a dependency-free Lovelace custom card at
 `www/central-heating-controller-card.js`.
-For the ready-made Overview, Schedule and Learning dashboard, see
+For the ready-made Now, Comfort times and Learning dashboard, see
 [Heating dashboard setup](heating-dashboard.md).
 
 HACS installs the integration directory only; this optional card must be copied
@@ -17,7 +17,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js?v=1.4.0
+url: /local/central-heating-controller-card.js?v=1.8.0
 type: module
 ```
 
@@ -32,10 +32,10 @@ mode: control
 The control card includes a **Mode** selector for `auto`, `away`, and `off`.
 It uses `select.<base>_controller_mode` and calls Home Assistant's
 `select.select_option` service; the existing auto-mode switch action remains
-available for compatibility. The collapsible **Schedule and night settings**
-editor lets you show or hide the smart schedule preview, add or remove any
-number of comfort periods for each day, and edit the night window and
-temperatures. Comfort windows are warm-by times; they do not turn the heating
+available for compatibility. The collapsible **When should the house be warm?**
+editor explicitly offers the existing schedule or custom comfort times. It lets
+you add or remove periods for each day and edit the night window and temperatures.
+The dedicated dashboard keeps planning and opt-in controls in Learning. Comfort windows are warm-by times; they do not turn the heating
 on at the start time. The High setpoint is the comfort temperature. If the
 weekly schedule has no windows, the existing Home Assistant schedule is used.
 The editor saves the full weekly schedule through the integration service. The Configure link remains
@@ -113,7 +113,7 @@ entities:
 A separate, read-only card with large current and target temperatures, a 24-hour
 forecast line, a dashed target line, and amber shading where heating is expected.
 It uses the same JavaScript resource as the other cards. Copy the updated file
-from the v1.7.1 release into `/config/www/central-heating-controller-card.js`,
+from the v1.8.0 release into `/config/www/central-heating-controller-card.js`,
 update the resource URL above, and refresh the browser.
 
 ```yaml

@@ -292,8 +292,11 @@ async def test_entity_states_availability_classes_units_and_attributes(hass, con
     assert status.attributes[ATTR_DEVICE_CLASS] == SensorDeviceClass.ENUM
     assert status.attributes[ATTR_OPTIONS] == [item.value for item in ControllerStatus]
     assert status.attributes["reason"] == "schedule_off_or_unavailable"
+    assert status.attributes["climate_entity"] == "climate.hallway"
+    assert status.attributes["schedule_entity"] == "schedule.heating"
     assert status.attributes["current_temperature"] == 16.0
     assert status.attributes["effective_target_temperature"] == 17.0
+    assert status.attributes["current_heating_demand_percent"] == 0.0
     for absent in (
         "learned_heating_rate",
         "manual_override",

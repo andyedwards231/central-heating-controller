@@ -90,6 +90,34 @@ async def test_schedule_uses_local_weekday_end_exclusive_and_24_hour_end():
 
 
 @pytest.mark.asyncio
+async def test_cached_schedule_is_normalised_and_excludes_arbitrary_data_even_if_weather_fails():
+    now = datetime(2025, 1, 6, 12, tzinfo=timezone.utc)
+    schedule = {
+        "schedule.heating": _schedule(
+            monday=[
+                {"from": "06:30:00", "to": "08:00:00", "data": {"temperature": 21}},
+                {"from": "22:00", "to": "24:00", "data": {"action": "heat"}},
+            ],
+            sunday=[{"from": "22:30", "to": "24:00:00", "data": {"anything": "ignored"}}],
+        )
+    }
+    adapter, _ = _inputs({"forecast": []}, schedule)
+
+    result = await adapter.async_load(now, "weather.home", "sensor.outdoor", "schedule.heating")
+
+    assert not result.available
+    assert adapter.cached_schedule("schedule.heating") == _schedule(
+        monday=[{"start": "06:30", "end": "08:00"}, {"start": "22:00", "end": "24:00"}],
+        sunday=[{"start": "22:30", "end": "24:00"}],
+    )
+
+
+def test_cached_schedule_is_absent_until_a_successful_response():
+    adapter, _ = _inputs({"forecast": []}, _schedule())
+    assert adapter.cached_schedule("schedule.heating") is None
+
+
+@pytest.mark.asyncio
 async def test_accepts_23_hour_forecast_with_explicit_tail_hold_assumption():
     now = datetime(2025, 1, 6, 12, tzinfo=timezone.utc)
     weather = {

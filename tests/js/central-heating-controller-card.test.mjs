@@ -157,9 +157,9 @@ test("schedule editor loads multiple periods, preserves drafts, and saves the fu
   card.hass = hass;
 
   assert.equal(card._scheduleDraft.weekly_schedule.monday.length, 3);
-  assert.match(card.shadowRoot.innerHTML, /Schedule and night settings/);
-  assert.match(card.shadowRoot.innerHTML, /Enable schedule planning/);
-  assert.match(card.shadowRoot.innerHTML, /warm by these times/);
+  assert.match(card.shadowRoot.innerHTML, /When should the house be warm/);
+  assert.match(card.shadowRoot.innerHTML, /Use my existing schedule/);
+  assert.match(card.shadowRoot.innerHTML, /Set the times you want to be warm/);
   card._setScheduleEditorOpen(true);
   card._updateScheduleDraft("weekly_schedule.monday.1.start", "12:30");
   hass.states["sensor.central_heating_controller_smart_heating_plan"] = {
@@ -187,7 +187,7 @@ test("schedule editor loads multiple periods, preserves drafts, and saves the fu
       night_start: "23:00", night_end: "06:00", night_temperature: 16.5, daytime_drop: 1,
     },
   });
-  assert.match(card.shadowRoot.innerHTML, /Schedule saved/);
+  assert.match(card.shadowRoot.innerHTML, /Saved for automatic timing/);
   assert.equal(card._scheduleDraftDirty, false);
   assert.match(card.shadowRoot.innerHTML, /class="chc-schedule-editor" open/);
 });
