@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.1 — 2026-10-24
+
+Keeps the first and final time labels inside the chart on narrow screens and
+fits the larger temperature buttons into their grid without overlap. Includes
+the simplified Now, Comfort times and Learning dashboard from v1.8.0. Use the
+attached JavaScript with `/local/central-heating-controller-card.js?v=1.8.1`.
+
+Validated with the same 537 Python and 69 JavaScript tests and a 390px phone check.
+
 ## 1.8.0 — 2026-10-24
 
 Simplifies the Heating dashboard into **Now**, **Comfort times** and **Learning**.

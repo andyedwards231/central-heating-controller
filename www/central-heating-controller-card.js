@@ -1028,7 +1028,8 @@ class CentralHeatingControllerCard extends HTMLElement {
         const day = formats.day.format(date);
         const previousDay = formats.day.format(new Date(time - interval));
         const tickLabel = includeDay || day !== previousDay ? `${day} ${label}` : label;
-        return `<g><line x1="${x(time)}" y1="${top}" x2="${x(time)}" y2="${height-bottom}" class="chc-chart-grid chc-chart-vgrid"/><text x="${x(time)}" y="${height-17}" text-anchor="middle">${this._escape(tickLabel)}</text></g>`;
+        const anchor = time >= tMax ? "end" : time === tMin ? "start" : "middle";
+        return `<g><line x1="${x(time)}" y1="${top}" x2="${x(time)}" y2="${height-bottom}" class="chc-chart-grid chc-chart-vgrid"/><text x="${x(time)}" y="${height-17}" text-anchor="${anchor}">${this._escape(tickLabel)}</text></g>`;
       };
       if (compact) {
         for (let i = 0; i <= 4; i++) timeTicks.push(axisTick(tMin + (tMax - tMin) * i / 4, i === 0 || i === 4));
@@ -1544,6 +1545,7 @@ class CentralHeatingControllerCard extends HTMLElement {
       .chc-disclosure .chc-readiness, .chc-disclosure .chc-learning-grid { margin-inline: 0; }
       .chc-dashboard-schedule .chc-setpoints { padding: 5px 24px 10px; max-width: 650px; }
       .chc-dashboard .chc-stepper button { width: 44px; height: 44px; min-height: 44px; font-size: 20px; }
+      .chc-dashboard .chc-stepper { grid-template-columns: repeat(2, 44px); }
       .chc-dashboard .chc-number { background: transparent; }
       .chc-dashboard .chc-number-value { font-size: 24px; }
       .chc-dashboard .chc-schedule-editor { margin: 0 24px 20px; border: 0; border-top: 1px solid var(--divider-color, #ddd); border-radius: 0; }
