@@ -15,11 +15,11 @@ def test_heating_dashboard_has_three_single_card_panel_views():
         "schedule",
         "learning",
     ]
-    assert [view["icon"] for view in config["views"]] == [
-        "mdi:radiator",
-        "mdi:calendar-clock",
-        "mdi:chart-line",
+    assert [view["title"] for view in config["views"]] == [
+        "Now", "Comfort times", "Learning",
     ]
+    # HA renders icon-only tabs when icons are configured, hiding these labels.
+    assert all("icon" not in view for view in config["views"])
     assert all(view["type"] == "panel" for view in config["views"])
     assert all(len(view["cards"]) == 1 for view in config["views"])
     assert [view["cards"][0]["mode"] for view in config["views"]] == [

@@ -2,7 +2,6 @@ title: Heating
 views:
   - title: Now
     path: overview
-    icon: mdi:radiator
     type: panel
     cards:
       - type: custom:central-heating-controller-card
@@ -11,7 +10,6 @@ views:
         mode: overview
   - title: Comfort times
     path: schedule
-    icon: mdi:calendar-clock
     type: panel
     cards:
       - type: custom:central-heating-controller-card
@@ -20,7 +18,6 @@ views:
         mode: schedule
   - title: Learning
     path: learning
-    icon: mdi:chart-line
     type: panel
     cards:
       - type: custom:central-heating-controller-card
