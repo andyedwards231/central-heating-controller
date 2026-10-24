@@ -270,6 +270,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._smart_health_context = None
         self._smart_health_checked_at: datetime | None = None
         self._command_error: str | None = None
+        self._in_place_options: dict | None = None
 
     @property
     def controller_mode(self) -> str:
@@ -1469,7 +1470,25 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         errors, normalized = _validate_settings(candidate, capabilities)
         if errors or normalized is None:
             raise HomeAssistantError(f"Invalid schedule: {next(iter(errors.values()))}")
-        self.hass.config_entries.async_update_entry(self.entry, options=dict(self.entry.options) | normalized)
+        await self._async_update_options_in_place(dict(self.entry.options) | normalized)
+
+    def handles_options_in_place(self, options) -> bool:
+        """Only our validated runtime writes may bypass the normal source reload."""
+        return self._in_place_options is not None and self._in_place_options == dict(options)
+
+    async def _async_update_options_in_place(self, options: dict) -> None:
+        """Persist a settings edit and refresh without removing HA entities."""
+        self._in_place_options = dict(options)
+        self._preview_cache = None
+        self._smart_target = None
+        self._smart_healthy_since = None
+        self._smart_health_context = None
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        await self.async_refresh()
+        # Number entities read options directly. Even if the policy/result is
+        # unchanged (e.g. editing High during a Low period), publish their values.
+        self._skip_duplicate_listener_update = False
+        super().async_update_listeners()
 
     async def _async_smart_preview(self, now, state, occupied, journey_home) -> dict:
         """Simulate proposed targets separately from every live control decision."""
@@ -1968,6 +1987,4 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self._set_manual_override(None, None)
         await self.store.async_save(self.persistent_state)
         self._override_dirty = False
-        updated = self.hass.config_entries.async_update_entry(self.entry, options=options)
-        if not updated:
-            await self.async_refresh()
+        await self._async_update_options_in_place(options)

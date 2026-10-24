@@ -540,7 +540,7 @@ wheels = [
 
 [[package]]
 name = "central-heating-controller"
-version = "1.7.0"
+version = "1.7.1"
 source = { virtual = "." }
 
 [package.dev-dependencies]

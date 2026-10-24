@@ -136,7 +136,11 @@ class ControllerSettingNumber(ControllerEntity, NumberEntity):
             assert self.entity_description.native_step is not None
             return self.entity_description.native_step
         capabilities = self._temperature_capabilities
-        return capabilities.step if capabilities is not None else None
+        if capabilities is None:
+            return None
+        # A missing climate step means unspecified, not whole degrees. Returning
+        # None here makes Home Assistant choose its own 1-degree Number default.
+        return capabilities.step if capabilities.step is not None else 0.5
 
     @property
     def available(self) -> bool:

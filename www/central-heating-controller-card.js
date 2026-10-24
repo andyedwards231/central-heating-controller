@@ -53,6 +53,8 @@ class CentralHeatingControllerCard extends HTMLElement {
     this._scheduleMessage = "";
     this._smartControlMessage = "";
     this._smartControlPending = false;
+    this._numberControlPending = new Set();
+    this._numberControlMessage = null;
   }
 
   setConfig(config) {
@@ -402,6 +404,7 @@ class CentralHeatingControllerCard extends HTMLElement {
   }
 
   async _adjustNumber(entityId, direction) {
+    if (this._numberControlPending.has(entityId)) return;
     const stateObj = this._state(entityId);
     if (!stateObj || stateObj.state === "unavailable" || stateObj.state === "unknown") {
       return;
@@ -425,7 +428,20 @@ class CentralHeatingControllerCard extends HTMLElement {
     }
     value = Number(value.toFixed(this._decimalPlaces(step)));
 
-    await this._callService("number", "set_value", { entity_id: entityId, value });
+    this._numberControlPending.add(entityId);
+    this._numberControlMessage = null;
+    this._requestRender(true);
+    try {
+      await this._callService("number", "set_value", { entity_id: entityId, value });
+    } catch (_error) {
+      this._numberControlMessage = {
+        entityId,
+        text: "Could not save this setting. Please try again.",
+      };
+    } finally {
+      this._numberControlPending.delete(entityId);
+      this._requestRender(true);
+    }
   }
 
   async _callService(domain, service, data) {
@@ -904,7 +920,9 @@ class CentralHeatingControllerCard extends HTMLElement {
     const stateObj = this._state(entityId);
     const unavailable = !stateObj || stateObj.state === "unavailable" || stateObj.state === "unknown";
     const value = unavailable ? "Unavailable" : this._formatEntity(entityId);
-    const disabled = unavailable ? "disabled" : "";
+    const pending = this._numberControlPending.has(entityId);
+    const disabled = unavailable || pending ? "disabled" : "";
+    const message = this._numberControlMessage?.entityId === entityId ? this._numberControlMessage.text : "";
 
     return `
       <div class="chc-number ${unavailable ? "is-disabled" : ""}">
@@ -913,9 +931,10 @@ class CentralHeatingControllerCard extends HTMLElement {
           <div class="chc-number-value">${this._escape(value)}</div>
         </div>
         <div class="chc-stepper">
-          <button type="button" data-action="decrement:${this._escape(entityId)}" ${disabled}>-</button>
-          <button type="button" data-action="increment:${this._escape(entityId)}" ${disabled}>+</button>
+          <button type="button" data-action="decrement:${this._escape(entityId)}" ${disabled} aria-label="Decrease ${this._escape(label)}">-</button>
+          <button type="button" data-action="increment:${this._escape(entityId)}" ${disabled} aria-label="Increase ${this._escape(label)}">+</button>
         </div>
+        ${pending ? '<span class="chc-number-message" role="status">Saving…</span>' : message ? `<span class="chc-number-message is-error" role="status">${this._escape(message)}</span>` : ""}
       </div>
     `;
   }
@@ -1236,6 +1255,14 @@ class CentralHeatingControllerCard extends HTMLElement {
       .chc-stepper button {
         min-height: 28px;
         padding: 0;
+      }
+      .chc-number-message {
+        grid-column: 1 / -1;
+        color: var(--secondary-text-color, #667085);
+        font-size: 12px;
+      }
+      .chc-number-message.is-error {
+        color: var(--error-color, #b3261e);
       }
       .chc-reason,
       .chc-alert,

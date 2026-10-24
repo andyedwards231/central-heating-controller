@@ -370,14 +370,14 @@ async def test_controller_mode_select_and_smart_schedule_service(hass, controlle
 async def test_temperature_numbers_allow_thermostat_to_omit_target_step(
     hass, controller_factory
 ) -> None:
-    """A valid thermostat without a target step uses Home Assistant's safe default."""
+    """A thermostat without a target step offers half-degree controller settings."""
     entry, _coordinator = await controller_factory(omitted_climate_attributes={"target_temp_step"})
 
     for key in (CONF_HIGH_TEMP, CONF_LOW_TEMP, CONF_ECO_TEMP):
         state = hass.states.get(_entity_id(hass, entry, "number", key))
         assert state is not None
         assert state.state != "unavailable"
-        assert state.attributes[ATTR_STEP] == 1.0
+        assert state.attributes[ATTR_STEP] == 0.5
 
 
 async def test_temperature_numbers_render_safely_when_climate_is_missing(
@@ -552,8 +552,8 @@ async def test_all_number_services_delegate_to_shared_setting_update(hass, contr
     assert [call.args for call in coordinator.async_update_setting.await_args_list] == list(changes)
 
 
-async def test_number_service_reloads_entry_and_replaces_entities(hass, controller) -> None:
-    """A real option update unloads the old coordinator and publishes replacement state."""
+async def test_number_service_updates_without_replacing_entities(hass, controller) -> None:
+    """Real services keep entities and the same coordinator while applying values."""
     entry, old_coordinator = controller
     low_entity = _entity_id(hass, entry, "number", CONF_LOW_TEMP)
 
@@ -566,10 +566,53 @@ async def test_number_service_reloads_entry_and_replaces_entities(hass, controll
     await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.runtime_data.coordinator is not old_coordinator
+    assert entry.runtime_data.coordinator is old_coordinator
     assert entry.options[CONF_LOW_TEMP] == 18.0
     assert _entity_id(hass, entry, "number", CONF_LOW_TEMP) == low_entity
     assert hass.states.get(low_entity).state == "18.0"
+
+
+async def test_half_degree_comfort_edits_keep_dashboard_entities_and_learning(hass, controller_factory):
+    """Editing High in a Low period still publishes the value without any unload."""
+    entry, coordinator = await controller_factory(omitted_climate_attributes={"target_temp_step"})
+    high_entity = _entity_id(hass, entry, "number", CONF_HIGH_TEMP)
+    status_entity = _entity_id(hass, entry, "sensor", "status")
+    learner = coordinator.learner
+    thermal_model = coordinator.thermal_model
+    lost_entities = []
+    def observe(event):
+        if event.data.get("entity_id") in (high_entity, status_entity):
+            state = event.data.get("new_state")
+            if state is None or state.state == "unavailable":
+                lost_entities.append(event.data["entity_id"])
+    remove = hass.bus.async_listen("state_changed", observe)
+    try:
+        for value in (20.5, 21, 20.5, 20):
+            await hass.services.async_call("number", "set_value",
+                {"entity_id": high_entity, "value": value}, blocking=True)
+            await hass.async_block_till_done()
+            assert float(hass.states.get(high_entity).state) == value
+            assert entry.runtime_data.coordinator is coordinator
+            assert coordinator.learner is learner
+            assert coordinator.thermal_model is thermal_model
+            assert hass.states.get(status_entity).state == "low"
+    finally:
+        remove()
+    assert lost_entities == []
+
+
+async def test_source_changes_still_reload_after_runtime_temperature_edit(hass, controller):
+    """The no-reload exemption cannot swallow later configuration/source changes."""
+    entry, coordinator = controller
+    await coordinator.async_update_setting(CONF_HIGH_TEMP, 20.5)
+    await hass.async_block_till_done()
+    reload_entry = AsyncMock()
+    with patch.object(type(hass.config_entries), "async_reload", reload_entry):
+        hass.config_entries.async_update_entry(entry, options=dict(entry.options) | {
+            "outdoor_temperature_entity": "sensor.new_outdoor_sensor",
+        })
+        await hass.async_block_till_done()
+    reload_entry.assert_awaited_once_with(entry.entry_id)
 
 
 @pytest.mark.parametrize(

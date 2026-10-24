@@ -114,6 +114,24 @@ test("schedule draft values survive a Home Assistant state refresh", () => {
   assert.match(card.shadowRoot.innerHTML, /data-draft-path="night_start" value="22:15"/);
 });
 
+test("schedule draft survives the status entity disappearing during an integration reload", () => {
+  const plan = "sensor.central_heating_controller_smart_heating_plan";
+  const status = "sensor.central_heating_controller_status";
+  const card = makeCard("schedule", {
+    [plan]: { state: "preview", attributes: { preview: true, settings: { enabled: true } } },
+  });
+  card._updateScheduleDraft("night_start", "22:15");
+
+  card.hass = { ...card.hass, states: { ...card.hass.states, [status]: undefined } };
+  assert.match(card.shadowRoot.innerHTML, /Status entity not found/);
+
+  card.hass = createHass({ states: {
+    [plan]: { state: "preview", attributes: { preview: true, settings: { enabled: true } } },
+  } });
+  assert.match(card.shadowRoot.innerHTML, /data-draft-path="night_start" value="22:15"/);
+  assert.equal(card._scheduleDraftDirty, true);
+});
+
 test("native forecast units take precedence over Home Assistant units", () => {
   const card = makeCard("overview", {
     'sensor.central_heating_controller_indoor_temperature_forecast': {state:'20', attributes:{temperature_unit:'°C'}},

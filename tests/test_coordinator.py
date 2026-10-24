@@ -756,8 +756,8 @@ async def test_update_setting_uses_shared_capability_validation(hass) -> None:
     assert entry.options[CONF_LOW_TEMP] == 18.0
 
 
-async def test_update_setting_relies_on_single_reload_without_old_writer(hass) -> None:
-    """An option update schedules reload without refreshing the old coordinator."""
+async def test_update_setting_refreshes_in_place_without_reload(hass) -> None:
+    """A numeric edit updates control without removing the dashboard's entities."""
     from homeassistant.components.climate import ClimateEntityFeature
 
     _set_baseline_states(hass)
@@ -776,6 +776,7 @@ async def test_update_setting_relies_on_single_reload_without_old_writer(hass) -
         },
     )
     coordinator, entry = await _setup_coordinator(hass)
+    entry.runtime_data = ControllerRuntimeData(coordinator)
     entry.add_update_listener(async_update_listener)
     hass.services.async_call.reset_mock()
     reload_entry = AsyncMock()
@@ -784,8 +785,9 @@ async def test_update_setting_relies_on_single_reload_without_old_writer(hass) -
         await coordinator.async_update_setting(CONF_LOW_TEMP, 18.0)
         await hass.async_block_till_done()
 
-    reload_entry.assert_awaited_once_with(entry.entry_id)
-    hass.services.async_call.assert_not_awaited()
+    reload_entry.assert_not_awaited()
+    assert coordinator.data.result.target_temperature == 18.0
+    assert coordinator.pending_target == 18.0
 
 
 async def test_state_event_requests_refresh(hass) -> None:

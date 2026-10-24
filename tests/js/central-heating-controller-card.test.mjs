@@ -256,6 +256,57 @@ test("increments high temperature using the number entity step", async () => {
   });
 });
 
+test("shows a rejected temperature update inline instead of leaving an unhandled rejection", async () => {
+  const card = new Card();
+  const hass = createHass({ hass: {
+    callService() { return Promise.reject(new Error("entity is no longer available")); },
+  } });
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+
+  await assert.doesNotReject(card._adjustNumber(card._entities.highTemperature, 1));
+
+  assert.match(card.shadowRoot.innerHTML, /Could not save this setting/);
+  assert.equal(card._numberControlPending.size, 0);
+});
+
+test("skips temperature service calls while the number entity is missing or unavailable", async () => {
+  const hass = createHass();
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+  const entityId = card._entities.highTemperature;
+
+  delete hass.states[entityId];
+  await card._adjustNumber(entityId, 1);
+  hass.states[entityId] = { state: "unavailable", attributes: { step: 0.5 } };
+  await card._adjustNumber(entityId, 1);
+
+  assert.equal(hass.calls.length, 0);
+});
+
+test("disables a temperature stepper while its service call is pending and ignores duplicate taps", async () => {
+  let resolveService;
+  let serviceCalls = 0;
+  const hass = createHass({ hass: {
+    callService() {
+      serviceCalls += 1;
+      return new Promise(resolve => { resolveService = resolve; });
+    },
+  } });
+  const card = new Card();
+  card.setConfig({ entity: "sensor.central_heating_controller_status" });
+  card.hass = hass;
+
+  const first = card._adjustNumber(card._entities.highTemperature, 1);
+  assert.match(card.shadowRoot.innerHTML, /data-action="increment:number\.central_heating_controller_high_temperature" disabled/);
+  await card._adjustNumber(card._entities.highTemperature, 1);
+  assert.equal(serviceCalls, 1);
+  resolveService();
+  await first;
+  assert.equal(card._numberControlPending.size, 0);
+});
+
 test("visual mode renders status journey details and quick actions", () => {
   const card = new Card();
   card.setConfig({

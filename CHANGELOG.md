@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.7.1 — 2026-10-24
+
+Fixes temperature and schedule edits briefly making the dashboard unavailable.
+Validated settings now update the running controller directly, preserving its
+entities, learned models and cached weather data while recalculating the plan.
+Changes to configured source entities still reload the integration as before.
+
+Temperature controls offer 0.5°C steps when the thermostat does not specify its
+own increment. An explicitly advertised thermostat increment is still honoured.
+The dashboard disables controls while saving and shows an inline message if a
+setting cannot be saved.
+
+Update through HACS and restart Home Assistant. Replace the dashboard JavaScript
+with the attached file and change the existing resource URL to
+`/local/central-heating-controller-card.js?v=1.7.1`, then refresh. Existing dashboard
+and kiosk YAML remain valid. Intelligent heating remains opt-in.
+
+Validated with 534 Python tests and 66 JavaScript tests.
+
 ## 1.7.0 — 2026-10-23
 
 Adds a readiness indicator and explicit opt-in intelligent heating control. The

@@ -103,7 +103,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: CentralHeatingConfigEnt
 
 
 async def async_update_listener(hass: HomeAssistant, entry: CentralHeatingConfigEntry) -> None:
-    """Reload an entry after any options update."""
+    """Reload source changes; runtime setting edits already refresh in place."""
+    coordinator = getattr(getattr(entry, "runtime_data", None), "coordinator", None)
+    handled = getattr(coordinator, "handles_options_in_place", None)
+    if callable(handled) and handled(entry.options) is True:
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
