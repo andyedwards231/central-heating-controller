@@ -81,7 +81,6 @@ from .const import (
     NAME,
     OPT_RESET_LEARNING_REQUESTED,
 )
-from .learning import HeatingRateLearner
 from .forecasting import ThermalForecaster, ForecastPoint
 from .heating_cost import HeatingCostModel
 from .forecast_accuracy import ForecastAccuracyTracker
@@ -234,7 +233,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         self.entry = entry
         self.store = ControllerStore(hass, entry.entry_id)
         self.persistent_state = PersistentState()
-        self.learner = HeatingRateLearner()
         self.heating_cost_model = HeatingCostModel()
         self._cost_forecast = []
         self._cost_saved_at = None
@@ -322,11 +320,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         """Restore state, consume one-shot actions, subscribe, and refresh."""
         try:
             self.persistent_state = await self.store.async_load()
-            self.learner = HeatingRateLearner(
-                self.persistent_state.learned_rate,
-                self.persistent_state.learned_sample_count,
-            )
-
             stored_cost = self.persistent_state.heating_cost
             if isinstance(stored_cost, dict) and stored_cost.get("sources") == self._cost_sources():
                 self.heating_cost_model = HeatingCostModel.restore_state(stored_cost, now=dt_util.utcnow())
@@ -345,7 +338,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             if self.entry.options.get(OPT_RESET_LEARNING_REQUESTED) is True:
                 self.persistent_state.smart_control_enabled = False
                 self.heating_cost_model = HeatingCostModel()
-                self.learner.reset()
+                self.persistent_state.learned_rate = None
+                self.persistent_state.learned_sample_count = 0
                 self.thermal_model = ThermalForecaster()
                 self.forecast_accuracy = ForecastAccuracyTracker()
                 self._copy_learning_state()
@@ -756,21 +750,49 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         if not self._available(eta):
             return False
         climate = self._climate_state()
-        current_temperature = (
-            _finite_float(climate.attributes.get(ATTR_CURRENT_TEMPERATURE))
-            if self._available(climate) and climate is not None
-            else None
-        )
-        settings = self.settings
-        warmup_minutes = self.learner.warmup_minutes(
-            current_temperature,
-            settings.high_temperature,
-            settings.fallback_warmup_minutes,
-            settings.maximum_warmup_minutes,
-        )
+        warmup_minutes, _ = self._warmup_estimate(now, climate)
         raw_eta = eta.state if self._available(eta) and eta is not None else None
         local_tz = dt_util.get_time_zone(self.hass.config.time_zone)
         return preheat_timing(raw_eta, now, int(warmup_minutes), local_tz).ready
+
+    def _warmup_estimate(self, now: datetime, climate: State | None) -> tuple[int, str]:
+        """Use the thermal model only with fresh valid inputs, otherwise fallback."""
+        settings = self.settings
+        fallback = min(settings.fallback_warmup_minutes, settings.maximum_warmup_minutes)
+        if (not self._available(climate) or climate is None
+                or not timedelta(0) <= now - climate.last_reported <= timedelta(minutes=30)):
+            return fallback, "fallback"
+        capabilities = _temperature_capabilities(climate, self.hass.config.units.temperature_unit)
+        if capabilities is None:
+            return fallback, "fallback"
+        indoor = _celsius(climate.attributes.get(ATTR_CURRENT_TEMPERATURE), capabilities.unit)
+        target = _celsius(settings.high_temperature, capabilities.unit)
+        if indoor is None or target is None:
+            return fallback, "fallback"
+        if indoor >= target:
+            return 0, "at_target"
+        outside_state = self.hass.states.get(self.config.get(CONF_OUTDOOR_TEMP, ""))
+        if (not self._available(outside_state) or outside_state is None
+                or not timedelta(0) <= now - outside_state.last_reported <= timedelta(hours=2)
+                or self._heating_demand(climate) is None):
+            return fallback, "fallback"
+        outdoor = _celsius(outside_state.state, outside_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT))
+        if outdoor is None:
+            return fallback, "fallback"
+        try:
+            minutes = self.thermal_model.warmup_minutes(
+                now, indoor, outdoor, target, settings.maximum_warmup_minutes,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return fallback, "fallback"
+        return (minutes, "thermal_model") if minutes is not None else (fallback, "fallback")
+
+    def _learned_heat_gain(self, climate: State | None) -> float | None:
+        """Keep the existing rate entity, now explicitly showing thermal heat gain."""
+        if not self.thermal_model.ready or climate is None:
+            return None
+        unit = climate.attributes.get(ATTR_UNIT_OF_MEASUREMENT, self.hass.config.units.temperature_unit)
+        return self.thermal_model.heat_gain_c_per_hour * (1.8 if unit == "°F" else 1)
 
     def _occupied(
         self,
@@ -823,8 +845,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         return [self.config.get(key) for key in (CONF_CLIMATE, CONF_OUTDOOR_TEMP, CONF_HEATING_ACTIVITY)]
 
     def _copy_learning_state(self) -> None:
-        self.persistent_state.learned_rate = self.learner.rate
-        self.persistent_state.learned_sample_count = self.learner.sample_count
+        # Retain legacy rate fields for compatibility; only the thermal model
+        # learns or determines warm-up now. Upgrading never clears saved data.
         self.persistent_state.thermal_model = self.thermal_model.to_dict() | {"sources": self._learning_sources()}
         self.persistent_state.forecast_accuracy = self.forecast_accuracy.to_dict()
         self.persistent_state.heating_cost = self.heating_cost_model.export_state() | {"sources": self._cost_sources()}
@@ -844,7 +866,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             self._smart_healthy_since = None
             result = self._fallback_result(dt_util.utcnow())
             if self.data is None:
-                state = ControllerState(result, None, self.learner.rate, self.learner.trusted,
+                state = ControllerState(result, None, None, False,
                                         None, None, self.settings.fallback_warmup_minutes)
             else:
                 state = replace(self.data, result=result)
@@ -917,23 +939,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             else None
         )
 
-        # Observe unavailable periods too, so an outage breaks the sample window.
-        learned = self.learner.observe(
-            now,
-            current_temperature,
-            current_target,
-            self._heating_active(climate) is True,
-        )
-        if learned is not None:
-            self._copy_learning_state()
-            await self.store.async_save(self.persistent_state)
-
-        warmup_minutes = self.learner.warmup_minutes(
-            current_temperature,
-            settings.high_temperature,
-            settings.fallback_warmup_minutes,
-            settings.maximum_warmup_minutes,
-        )
+        warmup_minutes, warmup_source = self._warmup_estimate(now, climate)
 
         away_changed = False
         for person_id, person in person_states.items():
@@ -1039,11 +1045,12 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         state = ControllerState(
             result=result,
             current_temperature=current_temperature,
-            learned_rate=self.learner.rate,
-            learned_trusted=self.learner.trusted,
+            learned_rate=self._learned_heat_gain(climate),
+            learned_trusted=self.thermal_model.ready,
             arrival_time=arrival,
             preheat_start_time=start,
             warmup_minutes=warmup_minutes,
+            warmup_source=warmup_source,
             temperature_capabilities=temperature_capabilities,
             auto_mode=self.persistent_state.auto_mode,
             temperature_forecast=(self.data.temperature_forecast if self.data else {}),
@@ -1080,24 +1087,25 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 issue_accuracy=False,
             )
             state = replace(state, temperature_forecast=forecast)
-        # Ingest this cycle's meter intervals before deciding whether the gas
-        # relationship is still usable. A new poor fit must block this cycle.
+        # Cost learning is refreshed independently from heating readiness. A
+        # missing meter or tariff leaves cost estimates unknown, not control unsafe.
+        cost_estimate_failed = False
         try:
             cost = await self._async_heating_cost(now, climate)
-            cost_ok = True
         except Exception:
             _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
-            cost_ok = False
+            cost_estimate_failed = True
             cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
                     for day in ("today", "tomorrow")}
         preview = await self._async_smart_preview(now, state, occupied, journey_home)
         readiness = self._smart_readiness(now, state, preview, occupied, journey_home)
-        if not cost_ok:
-            self._smart_healthy_since = None
-            readiness["ready"] = False
-            readiness["checks"].append({"key": "cost_inputs", "label": "Heating cost inputs",
-                                        "passed": False, "detail": "Heating cost inputs could not be processed."})
-            readiness["blockers"].append("Heating cost inputs")
+        if cost_estimate_failed:
+            status = readiness.get("cost_status", {"checks": [], "blockers": []})
+            status["available"] = False
+            status.setdefault("checks", []).append({"key": "cost_estimate", "label": "Heating cost estimate",
+                "passed": False, "detail": "Cost inputs could not be processed; cost is unknown."})
+            status.setdefault("blockers", []).append("Heating cost estimate")
+            readiness["cost_status"] = status
         active = defer_control and readiness["ready"]
         if active:
             target = self._safe_smart_target(now, state)
@@ -1151,15 +1159,14 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             _LOGGER.warning("Heating cost estimate unavailable", exc_info=True)
             cost = {day: {"cost_gbp": None, "reason": "Cost inputs could not be processed"}
                     for day in ("today", "tomorrow")}
-            if active:
-                self._smart_healthy_since = None
-                active = False
-                result = self._fallback_result(dt_util.utcnow())
-                readiness = dict(readiness, ready=False, blockers=readiness["blockers"] + ["Heating cost inputs"])
-                readiness.update(self._smart_control_description(readiness, False, result.status))
-                preview = dict(preview, state="preview", preview=True)
-                state = replace(state, result=result, temperature_forecast={"forecast": [], "confidence": "learning",
-                                    "reason": "Cost inputs changed; recalculating the existing schedule forecast"})
+            status = readiness.get("cost_status", {"checks": [], "blockers": []})
+            status["available"] = False
+            if not any(check.get("key") == "cost_estimate" for check in status.get("checks", [])):
+                status.setdefault("checks", []).append({"key": "cost_estimate", "label": "Heating cost estimate",
+                    "passed": False, "detail": "Cost inputs could not be processed; cost is unknown."})
+            if "Heating cost estimate" not in status.get("blockers", []):
+                status.setdefault("blockers", []).append("Heating cost estimate")
+            readiness["cost_status"] = status
         state = replace(state, heating_cost=cost, smart_plan=preview, smart_readiness=readiness)
         if defer_control and input_signature != self._smart_input_signature():
             # Service/storage awaits may admit a final mode change. Never send
@@ -1221,8 +1228,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
     def _smart_input_signature(self, *, include_climate=True) -> tuple:
         """Detect source changes while planning yields to the event loop."""
         keys = (CONF_CLIMATE, CONF_HOME_ZONE, CONF_SCHEDULE, CONF_DESTINATION,
-                CONF_ARRIVAL_TIME, CONF_OUTDOOR_TEMP, CONF_WEATHER, CONF_HEATING_ACTIVITY,
-                CONF_GAS_RATE, CONF_GAS_CONSUMPTION, CONF_GAS_PREVIOUS_CONSUMPTION)
+                CONF_ARRIVAL_TIME, CONF_OUTDOOR_TEMP, CONF_WEATHER, CONF_HEATING_ACTIVITY)
         entities = [self.config.get(key) for key in keys] + self.config[CONF_PERSONS]
         return (json.dumps(self.config, sort_keys=True),
                 self.controller_mode, self.persistent_state.smart_control_enabled,
@@ -1301,7 +1307,13 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                 rate_value = _finite_float(float(rate.state))
         except (ValueError, TypeError, OverflowError):
             pass
-        calibration = self.heating_cost_model.calibration()
+        try:
+            calibration = self.heating_cost_model.calibration()
+        except Exception:
+            _LOGGER.warning("Heating cost calibration unavailable", exc_info=True)
+            calibration = {"reason": "unavailable"}
+        if not isinstance(calibration, dict):
+            calibration = {"reason": "unavailable"}
         interval = dt_util.parse_datetime(str(calibration.get("latest_interval_end", "")))
         gas_fresh = (interval is not None and interval.tzinfo is not None
                      and timedelta(0) <= now - interval <= timedelta(hours=72))
@@ -1325,8 +1337,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                   "A homeward journey needs a valid future arrival time and fresh journey reports; otherwise existing preheating is used."),
             check("plan_fresh", "Up-to-date heating plan", plan_fresh,
                   "The plan must have been calculated within six minutes."),
-            check("gas_fresh", "Recent gas measurements", gas_fresh,
-                  "Needs a matched gas interval from the last 72 hours; delayed smart-meter readings are supported."),
             check("preview_enabled", "Schedule planning enabled", self.smart_settings()["enabled"],
                   "Enable schedule planning before using intelligent control."),
             check("commands", "Thermostat commands", self._command_error is None,
@@ -1336,7 +1346,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         result = evaluate_readiness(now, forecast=state.temperature_forecast, plan=plan,
                                     accuracy=evidence, input_checks=checks,
                                     cost_calibration=calibration,
-                                    rate_available=rate_value is not None and rate_value > 0)
+                                    rate_available=rate_value is not None and rate_value > 0,
+                                    gas_fresh=gas_fresh)
         context = (json.dumps(self.smart_settings(), sort_keys=True), self.settings.high_temperature,
                    self.settings.eco_temperature, tuple(self._learning_sources()), occupied,
                    self.controller_mode)
@@ -1385,7 +1396,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         if self._command_error:
             explanation = self._command_error
         learning_keys = {"thermal_windows", "model_score", "heating_response", "demand_model",
-                         "accuracy_1h", "accuracy_6h", "accuracy_24h", "gas_calibration"}
+                         "accuracy_1h", "accuracy_6h", "accuracy_24h"}
         learning = any(item["key"] in learning_keys and not item["passed"] for item in readiness["checks"])
         return {"state": "ready" if readiness["ready"] else "learning" if learning else "blocked",
                 "live_control_enabled": enabled, "control_state": control,
@@ -1642,11 +1653,6 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             except Exception:
                 _LOGGER.warning("Unable to persist heating cost learning", exc_info=True)
         return result
-
-    def _heating_active(self, climate: State | None) -> bool | None:
-        """Keep the legacy net-rise learner limited to binary activity sources."""
-        demand = self._heating_demand(climate)
-        return demand if isinstance(demand, bool) else None
 
     def _heating_demand(self, climate: State | None) -> bool | float | None:
         """Read binary activity or a percentage demand, never infer it from HVAC mode."""
@@ -1962,7 +1968,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
 
     async def async_reset_learning(self) -> None:
         """Clear the learned model and immediately re-evaluate."""
-        self.learner.reset()
+        self.persistent_state.learned_rate = None
+        self.persistent_state.learned_sample_count = 0
         self.heating_cost_model = HeatingCostModel()
         self.thermal_model = ThermalForecaster()
         self.forecast_accuracy = ForecastAccuracyTracker()

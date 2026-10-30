@@ -140,17 +140,27 @@ When nobody is home and the destination means home, the controller can pre-heat:
   time from the selected warm-up duration.
 - If the destination changes away from home, the pre-heat journey is cancelled.
 
-The adaptive model has a three-sample learning period. Until at least three valid
-heating samples are collected, it uses `fallback_warmup_minutes`. After that, it
-uses the trusted learned heating rate, current temperature, high target, and
-`maximum_warmup_minutes` cap. Use the options flow and choose reset learning if you
-change heating hardware, radiator balancing, insulation, or anything else that
-would make the old learned rate misleading.
+Arrival warm-up uses the same thermal model as the temperature forecast. Once it
+has at least 40 usable windows, a coverage score of 0.5, learned response timing
+and learned demand behaviour, it simulates recovery to within 0.1°C of the high
+target. The simulation includes heat loss, fractional demand and heating response,
+holding the current outdoor temperature constant for the short warm-up horizon.
+`maximum_warmup_minutes` caps the lead, including targets the model cannot reach
+within that time. Incomplete learning or missing/stale inputs use
+`fallback_warmup_minutes`. An indoor temperature already at target needs no warm-up.
 
-Learning requires the thermostat to report `hvac_action: heating`. If it does not,
-the controller continues using the fallback warm-up duration. An unavailable
-thermostat breaks the current learning sample, so time spent offline is not
-counted as observed heating. ETA values may be ISO timestamps or Unix timestamps
+Indoor and demand readings must be within 30 minutes and the outdoor reading
+within two hours. Both binary heating activity and percentage demand are supported.
+The existing learned-rate sensor now reports the thermal model's **Learned heat
+gain** at full demand, before heat loss, in °C/h or °F/h. Its entity ID is retained;
+this scalar is not used to calculate warm-up. The previous independent rate
+learner has been retired. Its stored values remain available in diagnostics.
+
+Existing thermal samples, forecast-error history, gas learning and settings survive
+this upgrade without a reset or storage migration. Use the options flow and choose
+reset learning after changing heating hardware, radiator balancing or insulation.
+An unavailable input breaks the current thermal window, so time spent offline is
+not counted as observed heating. ETA values may be ISO timestamps or Unix timestamps
 (including fractional seconds); timezone-free ISO values use Home Assistant's timezone.
 
 ### Tado X
@@ -297,7 +307,8 @@ outdoor sensor or demand/activity source starts fresh learning and accuracy
 tracking. The reset-learning option clears both. The new thermal model's storage
 format is version 2; previous version-1 thermal samples are discarded because
 they contain no response-delay information. This does not discard control
-settings or the separate legacy warm-up-rate learner.
+settings or archived legacy rate values. Version 1.9.0 keeps the existing version-2
+thermal format and all currently valid learning data.
 
 The forecast integrates heat flow every minute and publishes points every five
 minutes for the next 24 hours. The outdoor forecast is anchored to the live
@@ -305,10 +316,9 @@ outdoor reading, with that correction fading over three hours. Weekly schedules
 use Home Assistant's local time zone, including clock changes. Occupancy remains
 as it is now until a known home arrival; blast expiry, manual override expiry
 and preheating follow the existing controller policy. Future departures cannot
-be inferred. Forecasting does not change the thermostat's control policy or start
-heating early for scheduled high periods. The legacy warm-up estimator only
-learns from binary activity; with a percentage source it retains its existing
-estimate or configured fallback rather than treating partial demand as full heat.
+be inferred. The same thermal model estimates arrival warm-up; percentage demand
+is used as a fraction rather than treated as full heat. Scheduled high periods
+start early only when intelligent heating is explicitly enabled and ready.
 
 The card shows reported demand, learned response time, and mean absolute error
 for 1-, 6- and 24-hour forecasts once enough time has elapsed to score them. The
@@ -468,14 +478,19 @@ Readiness requires all of the following:
   weather, household presence inputs and the existing fallback schedule.
   A qualifying homeward journey needs fresh destination/ETA reports and a future
   ETA for intelligent arrival preheating; otherwise legacy preheating applies.
-- A usable gas calibration, positive GBP/kWh rate and a matched gas interval
-  within 72 hours. Calibration already requires 30 intervals over three dates,
-  including six heating and six non-heating intervals with sufficient variation
-  and an acceptably stable fit. Shared hot-water consumption remains an
-  attribution uncertainty, even after these checks pass.
 - All checks passing continuously for an hour. Missing a coordinator check for
   over two minutes, restarting, changing the planning context or failing a
   requirement restarts this confirmation period.
+
+Gas cost learning is optional and separate from heating readiness. Calibration,
+rate and gas freshness checks appear under `cost_status` in the readiness sensor
+and **Optional gas cost learning** in the dashboard. Missing meters, unstable gas
+fits, unavailable tariffs and cost-estimation errors leave costs unknown without
+blocking automatic heating timing or resetting its one-hour safety check.
+Calibration still requires 30 intervals over three dates, including six heating
+and six non-heating intervals, sufficient demand variation and a stable fit.
+Shared hot-water consumption remains an attribution uncertainty. All thermal,
+forecast-accuracy, input-freshness, comfort and thermostat command checks remain.
 
 Until enabled, **preview** means calculating a proposal without applying its
 targets. Heating follows the existing schedule: High during scheduled warmth,

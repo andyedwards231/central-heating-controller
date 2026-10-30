@@ -43,6 +43,7 @@ def evaluate_readiness(
     input_checks: list[dict],
     cost_calibration: dict,
     rate_available: bool,
+    gas_fresh: bool | None = None,
 ) -> dict:
     """Evaluate whether the supplied forecast, plan and recent evidence are ready.
 
@@ -141,12 +142,21 @@ def evaluate_readiness(
         calibration_detail = f"Gas calibration {reason_detail}; {calibration_counts}." if reason_detail else f"Gas calibration is unavailable; {calibration_counts}."
     else:
         calibration_detail = f"Gas calibration needs a finite, positive heat output in kW; {calibration_counts}."
-    add("gas_calibration", "Gas cost calibration", calibration_ok, calibration_detail)
-    add("rate_available", "Energy rate", rate_available is True, "An energy rate is available." if rate_available is True else "A valid energy rate is unavailable.")
+    cost_checks = [
+        {"key": "gas_calibration", "label": "Gas cost calibration", "passed": calibration_ok, "detail": calibration_detail},
+        {"key": "rate_available", "label": "Energy rate", "passed": rate_available is True,
+         "detail": "An energy rate is available." if rate_available is True else "A valid energy rate is unavailable."},
+    ]
+    if gas_fresh is not None:
+        cost_checks.append({"key": "gas_fresh", "label": "Recent gas measurements", "passed": gas_fresh is True,
+                            "detail": "A matched gas interval from the last 72 hours is available."
+                            if gas_fresh is True else "A matched gas interval from the last 72 hours is unavailable."})
 
     _add_accuracy_checks(checks, current, accuracy)
     blockers = [str(check["label"]) for check in checks if check["passed"] is not True]
-    return {"ready": not blockers, "checks": checks, "blockers": blockers}
+    cost_blockers = [str(check["label"]) for check in cost_checks if check["passed"] is not True]
+    return {"ready": not blockers, "checks": checks, "blockers": blockers,
+            "cost_status": {"available": not cost_blockers, "checks": cost_checks, "blockers": cost_blockers}}
 
 
 def _whole_count(value: object) -> int | None:

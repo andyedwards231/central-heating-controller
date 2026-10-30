@@ -91,6 +91,8 @@ class ControllerStatusSensor(ControllerEntity, SensorEntity):
             "effective_target_temperature": data.result.target_temperature,
             "current_heating_demand_percent": self.coordinator.current_heating_demand_percent(),
             "learned_heating_rate": data.learned_rate if data.learned_trusted else None,
+            "warmup_minutes": data.warmup_minutes,
+            "warmup_source": data.warmup_source,
             "manual_override": (True if data.status is ControllerStatus.MANUAL_OVERRIDE else None),
             "arrival_time": data.arrival_time,
             "preheat_start_time": data.preheat_start_time,
@@ -122,7 +124,7 @@ class ControllerEffectiveTargetSensor(ControllerEntity, SensorEntity):
 
 
 class ControllerLearnedRateSensor(ControllerEntity, SensorEntity):
-    """Publish a trusted learned temperature increase per hour."""
+    """Publish thermal heat gain; retain the entity ID for existing dashboards."""
 
     def __init__(self, coordinator: ControllerCoordinator, entry_id: str) -> None:
         """Initialize the learned rate sensor."""

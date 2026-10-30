@@ -132,6 +132,46 @@ class ThermalForecaster:
         return self._demand_model_learned
 
     @property
+    def ready(self) -> bool:
+        """Use the same learning evidence for forecasts and arrival warm-up."""
+        return (self.sample_count >= 40 and self.confidence >= 0.5
+                and self.lag_learned and self.demand_model_learned)
+
+    def warmup_minutes(
+        self, at: datetime, indoor_temperature: float, outdoor_temperature: float,
+        target_temperature: float, maximum_minutes: int,
+    ) -> int | None:
+        """Simulate recovery with the learned demand, heat loss and response.
+
+        None requests the configured fallback while learning is incomplete.
+        Unreachable targets use the maximum lead rather than a shorter fallback.
+        Outdoor temperature is held at the current reading for this short horizon.
+        """
+        indoor, outdoor, target = map(_number, (
+            indoor_temperature, outdoor_temperature, target_temperature,
+        ))
+        if (indoor is None or outdoor is None or target is None
+                or not -20 <= indoor <= 60 or not -60 <= outdoor <= 60
+                or not -20 <= target <= 60 or _timestamp(at) is None
+                or isinstance(maximum_minutes, bool) or not isinstance(maximum_minutes, int)
+                or not 0 <= maximum_minutes <= 360):
+            return None
+        if indoor >= target:
+            return 0
+        if not self.ready:
+            return None
+        if maximum_minutes == 0:
+            return 0
+        prediction = self.forecast(at, indoor, lambda _: outdoor, lambda _: target,
+                                   hours=maximum_minutes / 60, step_minutes=1)
+        # Match the thermostat's useful temperature resolution, while requiring
+        # the room to be below target before any warm-up is requested.
+        for point in prediction.points[1:]:
+            if point.indoor_temperature >= target - 0.1:
+                return min(maximum_minutes, max(1, round((point.at - at).total_seconds() / 60)))
+        return maximum_minutes
+
+    @property
     def confidence(self) -> float:
         """Return a heuristic score, not a calibrated probability."""
         if not self._identifiable:

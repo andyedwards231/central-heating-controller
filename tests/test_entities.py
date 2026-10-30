@@ -580,7 +580,6 @@ async def test_half_degree_comfort_edits_keep_dashboard_entities_and_learning(ha
     entry, coordinator = await controller_factory(omitted_climate_attributes={"target_temp_step"})
     high_entity = _entity_id(hass, entry, "number", CONF_HIGH_TEMP)
     status_entity = _entity_id(hass, entry, "sensor", "status")
-    learner = coordinator.learner
     thermal_model = coordinator.thermal_model
     lost_entities = []
     def observe(event):
@@ -596,7 +595,6 @@ async def test_half_degree_comfort_edits_keep_dashboard_entities_and_learning(ha
             await hass.async_block_till_done()
             assert float(hass.states.get(high_entity).state) == value
             assert entry.runtime_data.coordinator is coordinator
-            assert coordinator.learner is learner
             assert coordinator.thermal_model is thermal_model
             assert hass.states.get(status_entity).state == "low"
     finally:
@@ -657,8 +655,6 @@ async def test_dynamic_sensor_availability_and_status_details(hass, controller) 
 
     data = coordinator.data
     coordinator.persistent_state.manual_override_target = 18.5
-    coordinator.learner._rate = 1.25
-    coordinator.learner._sample_count = 3
     coordinator.async_set_updated_data(
         type(data)(
             result=type(data.result)(

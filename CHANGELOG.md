@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.9.0 — 2026-10-30
+
+Separates optional gas cost learning from automatic heating readiness. Unstable
+gas calibration, unavailable rates or meters, and cost-estimation failures leave
+cost estimates unknown without preventing temperature control. Temperature-model
+evidence, forecast accuracy, fresh inputs, feasible plans, an hour of continuous
+safety checks, explicit opt-in and thermostat command/target guards remain.
+The Learning dashboard gives optional gas learning its own collapsed section.
+
+Arrival warm-up now simulates the newer thermal model's demand, heat loss and
+response behaviour. Missing or stale inputs and incomplete learning use the
+configured fallback duration; the configured maximum remains a hard cap. The
+retired binary rate learner is removed from active control. Its saved values
+remain in diagnostics, and the existing rate entity now reports **Learned heat
+gain** at full demand, before heat loss.
+
+Existing thermal samples, forecast errors, gas observations, settings, comfort
+times and opt-in state are retained. Storage versions and learning-source keys
+are unchanged; no reset or migration is needed. Installation keeps automatic
+timing off unless it was explicitly enabled before.
+
+Update the integration through HACS when ready, then restart Home Assistant.
+For the separate dashboard changes, copy the attached JavaScript and update its
+resource URL to `/local/central-heating-controller-card.js?v=1.9.0`.
+
+Validated with 512 Python tests, 71 JavaScript tests, Ruff, and a browser check
+of ready heating alongside unavailable optional costs using simulated data.
+
 ## 1.8.1 — 2026-10-24
 
 Keeps the first and final time labels inside the chart on narrow screens and

@@ -17,7 +17,7 @@ Copy it to your Home Assistant config:
 Add the Lovelace resource:
 
 ```yaml
-url: /local/central-heating-controller-card.js?v=1.8.1
+url: /local/central-heating-controller-card.js?v=1.9.0
 type: module
 ```
 
@@ -113,7 +113,7 @@ entities:
 A separate, read-only card with large current and target temperatures, a 24-hour
 forecast line, a dashed target line, and amber shading where heating is expected.
 It uses the same JavaScript resource as the other cards. Copy the updated file
-from the v1.8.1 release into `/config/www/central-heating-controller-card.js`,
+from the v1.9.0 release into `/config/www/central-heating-controller-card.js`,
 update the resource URL above, and refresh the browser.
 
 ```yaml

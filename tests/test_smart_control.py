@@ -230,11 +230,11 @@ async def test_real_readiness_requires_uninterrupted_hour_and_drops_on_stale_dem
     hass.config_entries.async_update_entry(coordinator.entry, options=dict(coordinator.entry.options) | {
         CONF_GAS_RATE: "sensor.gas_rate", CONF_HEATING_ACTIVITY: "sensor.demand",
     })
-    hass.states.async_set("sensor.gas_rate", ".09", {"unit_of_measurement": "GBP/kWh"})
     hass.states.async_set("sensor.demand", "10", {"unit_of_measurement": "%"})
     coordinator.heating_cost_model.calibration = Mock(return_value={
-        "reason": None, "heat_kw": 12, "sample_count": 30, "heating_samples": 6,
-        "nonheating_samples": 6, "distinct_dates": 3, "latest_interval_end": NOW.isoformat(),
+        "reason": "insufficient_samples", "heat_kw": None, "sample_count": 4, "heating_samples": 1,
+        "nonheating_samples": 3, "distinct_dates": 1,
+        "latest_interval_end": (NOW - timedelta(days=5)).isoformat(),
     })
     coordinator.forecast_accuracy.readiness_metrics = Mock(side_effect=lambda now: {
         h: {"count": count, "mae_c": .1, "bias_c": 0, "distinct_dates": 3,
@@ -257,13 +257,24 @@ async def test_real_readiness_requires_uninterrupted_hour_and_drops_on_stale_dem
 
     first = evaluate(NOW)
     assert [c["key"] for c in first["checks"] if not c["passed"]] == ["stable"]
+    assert first["cost_status"]["available"] is False
     for minute in range(1, 61):
         result = evaluate(NOW + timedelta(minutes=minute))
     assert result["ready"] is True
-    stale = evaluate(NOW + timedelta(minutes=61), stale=True)
+    assert result["cost_status"]["available"] is False
+    coordinator.heating_cost_model.calibration.side_effect = RuntimeError("bad gas history")
+    throwing_calibration = evaluate(NOW + timedelta(minutes=61))
+    assert throwing_calibration["ready"] is True
+    assert throwing_calibration["cost_status"]["available"] is False
+    coordinator.heating_cost_model.calibration.side_effect = None
+    coordinator.heating_cost_model.calibration.return_value = None
+    malformed_calibration = evaluate(NOW + timedelta(minutes=62))
+    assert malformed_calibration["ready"] is True
+    assert malformed_calibration["cost_status"]["available"] is False
+    stale = evaluate(NOW + timedelta(minutes=63), stale=True)
     assert stale["ready"] is False
     assert "Heating activity signal" in stale["blockers"]
-    assert evaluate(NOW + timedelta(minutes=62))["ready"] is False
+    assert evaluate(NOW + timedelta(minutes=64))["ready"] is False
     # A gap in actual coordinator checks must not count as uninterrupted success.
     assert evaluate(NOW + timedelta(hours=3))["ready"] is False
 
@@ -353,21 +364,16 @@ async def test_unexpected_planning_error_restores_legacy_in_same_cycle(hass, env
     assert coordinator.data.smart_readiness["control_state"] == "fallback"
 
 
-async def test_new_gas_evidence_is_processed_before_readiness(hass, environment):
+async def test_throwing_gas_cost_estimate_does_not_deactivate_smart_control(hass, environment):
     coordinator = await controller(hass, enabled=True)
     ready_pipeline(coordinator)
-    fit_good = True
-    async def ingest_bad_interval(*args):
-        nonlocal fit_good
-        fit_good = False
-        return {}
-    coordinator._async_heating_cost.side_effect = ingest_bad_interval
-    coordinator._smart_readiness.side_effect = lambda *args: {
-        "ready": fit_good, "checks": [], "blockers": [] if fit_good else ["Gas cost calibration"]}
+    coordinator._async_heating_cost.side_effect = RuntimeError("meter unavailable")
     environment.reset_mock()
     await refresh(coordinator)
-    assert temperatures(environment) == [17]
-    assert coordinator.data.smart_readiness["control_state"] == "fallback"
+    assert temperatures(environment) == [18.5]
+    assert coordinator.data.smart_readiness["control_state"] == "active"
+    assert coordinator.data.heating_cost["today"]["cost_gbp"] is None
+    assert coordinator.persistent_state.smart_control_enabled is True
 
 
 async def test_disable_during_target_write_immediately_restores_existing_schedule(hass, environment):

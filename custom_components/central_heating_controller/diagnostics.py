@@ -92,8 +92,13 @@ async def async_get_config_entry_diagnostics(
             "reason": state.result.reason if state is not None else None,
             "auto_mode": coordinator.persistent_state.auto_mode,
             "blast_active": (blast_until is not None and blast_until > dt_util.utcnow()),
-            "learned_sample_count": coordinator.learner.sample_count,
-            "learned_rate": coordinator.learner.rate,
+            "learned_sample_count": coordinator.thermal_model.sample_count,
+            "learned_rate": state.learned_rate if state is not None else None,
+            "warmup_source": state.warmup_source if state is not None else "fallback",
+            "legacy_learning": {
+                "learned_sample_count": coordinator.persistent_state.learned_sample_count,
+                "learned_rate": coordinator.persistent_state.learned_rate,
+            },
         },
         "entity_availability": {
             CONF_CLIMATE: _available(hass.states.get(config[CONF_CLIMATE])),

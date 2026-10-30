@@ -105,8 +105,8 @@ class TemperatureCapabilities:
 class ControllerState:
     """Immutable state published by the coordinator after each evaluation.
 
-    ``learned_rate`` is the learner's raw persisted estimate; consumers must
-    consult ``learned_trusted`` before using it for decisions.
+    ``learned_rate`` is the thermal model's full-demand heat gain before heat
+    loss, in the thermostat unit. Warm-up uses simulation, not this scalar.
     """
 
     result: ControlResult
@@ -122,6 +122,7 @@ class ControllerState:
     heating_cost: dict = field(default_factory=dict)
     smart_plan: dict = field(default_factory=dict)
     smart_readiness: dict = field(default_factory=dict)
+    warmup_source: str = "fallback"
 
     @property
     def status(self) -> ControllerStatus:
