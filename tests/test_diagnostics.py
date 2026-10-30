@@ -143,8 +143,10 @@ async def test_config_entry_diagnostics_are_useful_and_explicitly_redacted(
         "reason": "blast_active",
         "auto_mode": True,
         "blast_active": True,
-        "learned_sample_count": 4,
-        "learned_rate": 1.25,
+        "learned_sample_count": 0,
+        "learned_rate": None,
+        "warmup_source": "fallback",
+        "legacy_learning": {"learned_sample_count": 4, "learned_rate": 1.25},
     }
     assert diagnostics["entity_availability"] == {
         CONF_CLIMATE: True,

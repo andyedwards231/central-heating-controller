@@ -648,15 +648,18 @@ async def test_blast_auto_and_expiry_actions(hass) -> None:
 
 
 async def test_learning_accepts_sample_and_persists(hass, freezer) -> None:
-    """Active-heating observations update and persist the learned model."""
+    """Thermal observations persist without updating the archived rate learner."""
+    from tests.test_temperature_forecast import _forecast_config, _set_forecast_states
     freezer.move_to(NOW)
     _set_baseline_states(hass)
+    _set_forecast_states(hass)
     hass.states.async_set(
         "climate.hallway",
         "heat",
         {"current_temperature": 16.0, "temperature": 20.0, "hvac_action": "heating"},
     )
-    coordinator, _ = await _setup_coordinator(hass)
+    coordinator, _ = await _setup_coordinator(hass, data=_forecast_config(),
+        state=PersistentState(learned_rate=1.25, learned_sample_count=4))
     coordinator.store.async_save.reset_mock()
     freezer.move_to(NOW + timedelta(minutes=30))
     hass.states.async_set(
@@ -671,8 +674,10 @@ async def test_learning_accepts_sample_and_persists(hass, freezer) -> None:
     ):
         await coordinator.async_refresh()
 
-    assert coordinator.data.learned_rate == 1.0
-    assert coordinator.persistent_state.learned_sample_count == 1
+    assert coordinator.thermal_model.sample_count >= 1
+    assert coordinator.persistent_state.thermal_model["rows"]
+    assert coordinator.persistent_state.learned_rate == 1.25
+    assert coordinator.persistent_state.learned_sample_count == 4
     coordinator.store.async_save.assert_awaited()
 
 
@@ -685,11 +690,11 @@ async def test_reset_marker_and_explicit_reset(hass) -> None:
     )
 
     assert OPT_RESET_LEARNING_REQUESTED not in entry.options
-    assert coordinator.learner.rate is None
-    coordinator.learner._rate = 2.0
-    coordinator.learner._sample_count = 4
+    assert coordinator.persistent_state.learned_rate is None
+    coordinator.persistent_state.learned_rate = 2.0
+    coordinator.persistent_state.learned_sample_count = 4
     await coordinator.async_reset_learning()
-    assert coordinator.learner.rate is None
+    assert coordinator.persistent_state.learned_rate is None
     assert coordinator.persistent_state.learned_sample_count == 0
 
 
@@ -2118,14 +2123,16 @@ async def test_minute_evaluation_expires_both_command_ledgers(hass) -> None:
 
 
 async def test_thermostat_outage_breaks_learning_window(hass, freezer) -> None:
-    """An unobserved outage must not contribute to the learned heating rate."""
+    """An unobserved outage must not contribute a thermal learning window."""
+    from tests.test_temperature_forecast import _forecast_config, _set_forecast_states
     freezer.move_to(NOW)
     _set_baseline_states(hass)
+    _set_forecast_states(hass)
     hass.states.async_set(
         "climate.hallway", "heat",
         {"current_temperature": 16.0, "temperature": 20.0, "hvac_action": "heating"},
     )
-    coordinator, _ = await _setup_coordinator(hass)
+    coordinator, _ = await _setup_coordinator(hass, data=_forecast_config())
     freezer.move_to(NOW + timedelta(minutes=10))
     hass.states.async_set("climate.hallway", STATE_UNAVAILABLE)
     await hass.async_block_till_done()
@@ -2136,8 +2143,8 @@ async def test_thermostat_outage_breaks_learning_window(hass, freezer) -> None:
     )
     await hass.async_block_till_done()
 
-    assert coordinator.learner.sample_count == 0
-    assert coordinator.learner.rate is None
+    assert coordinator.thermal_model.sample_count == 0
+    assert coordinator.data.learned_rate is None
 
 
 @pytest.mark.parametrize("initial_target", [15.0, 17.0])

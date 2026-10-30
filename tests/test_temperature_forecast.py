@@ -174,19 +174,19 @@ async def test_heating_activity_signal_takes_precedence_and_fallback_uses_hvac_a
     coordinator, _ = await _setup_coordinator(
         hass, data=_forecast_config() | {CONF_HEATING_ACTIVITY: "binary_sensor.boiler"}
     )
-    assert coordinator._heating_active(hass.states.get("climate.hallway")) is False
+    assert coordinator._heating_demand(hass.states.get("climate.hallway")) is False
     hass.states.async_set("binary_sensor.boiler", "heating")
-    assert coordinator._heating_active(hass.states.get("climate.hallway")) is True
+    assert coordinator._heating_demand(hass.states.get("climate.hallway")) is True
     hass.states.async_set("climate.hallway", "heat", {**hass.states.get("climate.hallway").attributes,
                                                         "hvac_action": "heating"})
-    assert coordinator._heating_active(hass.states.get("climate.hallway")) is True
+    assert coordinator._heating_demand(hass.states.get("climate.hallway")) is True
     fallback, _ = await _setup_coordinator(hass, data=_forecast_config())
     hass.states.async_set("climate.hallway", "heat", {**hass.states.get("climate.hallway").attributes,
                                                         "hvac_action": "idle"})
-    assert fallback._heating_active(hass.states.get("climate.hallway")) is False
+    assert fallback._heating_demand(hass.states.get("climate.hallway")) is False
     hass.states.async_set("climate.hallway", "heat", {**hass.states.get("climate.hallway").attributes,
                                                         "hvac_action": "heating"})
-    assert fallback._heating_active(hass.states.get("climate.hallway")) is True
+    assert fallback._heating_demand(hass.states.get("climate.hallway")) is True
 
 
 async def test_thermal_model_persists_and_reset_clears_it(hass):
@@ -219,7 +219,7 @@ async def test_percentage_demand_is_validated_and_not_used_as_binary_heat(hass, 
     )
     climate = hass.states.get("climate.hallway")
     assert coordinator._heating_demand(climate) == expected
-    assert coordinator._heating_active(climate) is None
+    assert not isinstance(coordinator._heating_demand(climate), bool)
 
 
 async def test_demand_and_observed_setpoint_reach_model_and_forecast_attributes(hass):

@@ -49,7 +49,7 @@
         "name": "Effective target temperature"
       },
       "learned_heating_rate": {
-        "name": "Learned heating rate"
+        "name": "Learned heat gain"
       },
       "preheat_start_time": {
         "name": "Pre-heat start time"

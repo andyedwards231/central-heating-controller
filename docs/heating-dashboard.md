@@ -7,7 +7,9 @@ The Heating dashboard has three views:
   periods. The next expected target change and heating period appear below it.
 - **Comfort times** lets you choose when you want warmth and the comfort temperature.
 - **Learning** explains what is still needed before automatic timing can take control.
-  Detailed measurements and safety checks are collapsed by default.
+  Detailed temperature measurements and safety checks are collapsed by default.
+  **Optional gas cost learning** has its own status; unreliable or missing cost
+  estimates do not prevent automatic timing from becoming ready.
 
 ## Do I need to enter comfort times?
 
@@ -59,9 +61,9 @@ manual installation:
 1. Copy `www/central-heating-controller-card.js` to
    `/config/www/central-heating-controller-card.js`.
 2. In Home Assistant, open **Settings → Dashboards → Resources**, add
-   `/local/central-heating-controller-card.js?v=1.8.1` as a **JavaScript module**, and save.
+   `/local/central-heating-controller-card.js?v=1.9.0` as a **JavaScript module**, and save.
    Add this resource once; the three views share it. If it is already registered
-   for another controller card or kiosk dashboard, edit that single registration to use `?v=1.8.1`.
+   for another controller card or kiosk dashboard, edit that single registration to use `?v=1.9.0`.
 3. Refresh the browser after copying or updating the file.
 
 The kiosk dashboard remains unchanged. Its existing forecast card can use the same

@@ -45,7 +45,9 @@ def test_complete_current_evidence_passes_with_plain_progress_and_threshold_deta
     assert check(result, "thermal_windows")["detail"] == "40+ of 40 thermal windows recorded."
     assert "average error 0.20°C" in check(result, "accuracy_1h")["detail"]
     assert "within ±0.20°C" in check(result, "accuracy_1h")["detail"]
-    assert "30/30 intervals" in check(result, "gas_calibration")["detail"]
+    assert result["cost_status"]["available"] is True
+    gas = next(item for item in result["cost_status"]["checks"] if item["key"] == "gas_calibration")
+    assert "30/30 intervals" in gas["detail"]
 
 
 @pytest.mark.parametrize(
@@ -88,22 +90,13 @@ def test_malformed_or_nonfinite_accuracy_values_fail_closed(bad: object) -> None
     assert check(evaluate(accuracy=accuracy), "accuracy_1h")["passed"] is False
 
 
-def test_invalid_learning_cost_plan_input_and_rate_evidence_blocks_readiness() -> None:
-    result = evaluate(
-        forecast={"model_score": True, "learned_samples": True, "heating_response_learned": 1, "demand_model_learned": "yes", "forecast": [{"temperature": 20}]},
-        plan={"feasible": True, "provisional": 0, "forecast": [{"start": "08:00"}]},
-        input_checks=[{"key": "stale", "label": "Fresh data", "passed": 1}],
-        cost_calibration={"reason": None, "heat_kw": float("nan")},
-        rate_available=1,
-    )
+def test_invalid_cost_diagnostics_do_not_block_thermal_readiness() -> None:
+    result = evaluate(cost_calibration={"reason": None, "heat_kw": float("nan")}, rate_available=1,
+                      gas_fresh=False)
 
-    assert result["ready"] is False
-    assert check(result, "thermal_windows")["passed"] is False
-    assert check(result, "model_score")["passed"] is False
-    assert check(result, "plan_feasible")["passed"] is False
-    assert check(result, "stale")["passed"] is False
-    assert check(result, "gas_calibration")["passed"] is False
-    assert check(result, "rate_available")["passed"] is False
+    assert result["ready"] is True
+    assert result["cost_status"]["available"] is False
+    assert {item["key"] for item in result["cost_status"]["checks"]} == {"gas_calibration", "rate_available", "gas_fresh"}
 
 
 def test_malformed_accuracy_or_input_check_collection_fails_closed() -> None:

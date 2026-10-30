@@ -11,6 +11,7 @@ const PLAN = "sensor.central_heating_controller_smart_heating_plan";
 const READINESS = "sensor.central_heating_controller_smart_heating_readiness";
 const CONTROL = "switch.central_heating_controller_smart_heating_control";
 const MODE = "select.central_heating_controller_controller_mode";
+const COST = "sensor.central_heating_controller_predicted_heating_cost_today";
 
 function makeCard(mode, states = {}, hass = {}) {
   const card = new Card();
@@ -26,6 +27,42 @@ function forecast(points, attributes = {}) {
 function point(time, target, demand, temperature = 18) {
   return { datetime: new Date(time).toISOString(), temperature, target_temperature: target, heating_demand_percent: demand };
 }
+
+test("gas cost learning has its own status and does not prevent enabling ready heating", async () => {
+  const card = makeCard("learning", {
+    [READINESS]: { state: "ready", attributes: { ready: true, control_state: "preview",
+      checks: [{ key: "stable", passed: true }],
+      cost_status: { available: false, checks: [{key: "gas_calibration", passed: false,
+        detail: "Gas calibration has an unstable fit."}], blockers: ["Gas cost calibration"] },
+    } },
+    [MODE]: { state: "auto", attributes: {} },
+    [CONTROL]: { state: "off", attributes: {} },
+    [COST]: {state: "unknown", attributes: {reason: "unstable_fit", calibration: {sample_count: 271}}},
+  });
+  const html = card.shadowRoot.innerHTML;
+  assert.match(html, /Ready to use automatic timing/);
+  assert.match(html, /Optional gas cost learning/);
+  assert.match(html, /do not yet have a consistent relationship/);
+  assert.match(html, /does not delay automatic heating timing/);
+  assert.match(html, /Matched gas readings: 271/);
+  assert.doesNotMatch(html, /More gas readings during heating/);
+  await card._setSmartHeatingControl(true);
+  assert.equal(card.hass.calls.at(-1).service, "turn_on");
+});
+
+test("optional gas diagnostics are escaped and cannot hide a thermal safety failure", () => {
+  const card = makeCard("learning", {
+    [READINESS]: {state: "blocked", attributes: {ready: false, checks: [
+      {key: "demand", passed: false}], cost_status: {available: true,
+      checks: [{detail: '<img src=x onerror="bad()">'}]}}},
+    [MODE]: {state: "auto", attributes: {}},
+    [CONTROL]: {state: "off", attributes: {}},
+  });
+  assert.match(card.shadowRoot.innerHTML, /A missing reading or heating connection needs attention/);
+  assert.match(card.shadowRoot.innerHTML, /&lt;img/);
+  assert.doesNotMatch(card.shadowRoot.innerHTML, /<img src=x/);
+  assert.match(card.shadowRoot.innerHTML, /data-action="smart-control:on" disabled/);
+});
 
 test("next-change summary groups only continuous future demand and finds a target change", () => {
   const now = Date.parse("2026-06-29T17:00:00Z");

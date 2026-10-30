@@ -321,7 +321,7 @@ test("visual mode renders status journey details and quick actions", () => {
   assert.match(card.shadowRoot.innerHTML, /Heat blast/);
   assert.match(card.shadowRoot.innerHTML, /Pre-heat start/);
   assert.match(card.shadowRoot.innerHTML, /Arrival/);
-  assert.match(card.shadowRoot.innerHTML, /Learned rate/);
+  assert.match(card.shadowRoot.innerHTML, /Learned heat gain/);
   assert.match(card.shadowRoot.innerHTML, /1.8 degC\/h/);
   assert.match(card.shadowRoot.innerHTML, /Auto mode on/);
   assert.match(card.shadowRoot.innerHTML, /Heat Blast/);

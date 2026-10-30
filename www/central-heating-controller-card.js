@@ -676,10 +676,9 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (["thermal_windows", "model_score"].some(key => failed.has(key))) needs.push("More examples of the house heating up and cooling down.");
     if (failed.has("heating_response")) needs.push("More heating starts and stops to measure the warm-up delay.");
     if (failed.has("demand_model")) needs.push("More examples of how the thermostat responds to a temperature change.");
-    if (failed.has("gas_calibration")) needs.push("More gas readings during heating, to improve cost estimates.");
     if (["accuracy_1h", "accuracy_6h", "accuracy_24h"].some(key => failed.has(key))) needs.push("More accurate temperature forecasts, checked across several days.");
     if (failed.has("plan_feasible") && !["thermal_windows", "model_score", "heating_response", "demand_model"].some(key => failed.has(key))) needs.push("A plan that can reach your comfort temperature in time.");
-    const dataKeys = ["thermostat", "outdoor", "weather", "demand", "occupancy", "schedule", "arrival", "plan_fresh", "gas_fresh", "rate_available", "commands", "clock"];
+    const dataKeys = ["thermostat", "outdoor", "weather", "demand", "occupancy", "schedule", "arrival", "plan_fresh", "commands", "clock"];
     if (dataKeys.some(key => failed.has(key))) needs.push("A missing reading or heating connection needs attention. See detailed checks below.");
     if (failed.has("preview_enabled")) needs.push("Schedule planning needs to be enabled in the settings below.");
     if (!needs.length && failed.has("stable")) needs.push("One continuous hour with all the safety checks passing.");
@@ -689,6 +688,24 @@ class CentralHeatingControllerCard extends HTMLElement {
 
   _detail(key, title, body) {
     return `<details class="chc-disclosure" data-detail="${key}" ${this._openDetails.has(key) ? "open" : ""}><summary>${title}</summary><div class="chc-disclosure-body">${body}</div></details>`;
+  }
+
+  _renderCostLearning() {
+    const attrs = this._state(this._entities.heatingCostToday)?.attributes || {};
+    const calibration = attrs.calibration || {};
+    const status = this._readiness().attrs.cost_status;
+    const messages = {
+      unstable_fit: "Gas use and reported heating demand do not yet have a consistent relationship. Cost estimates remain unknown.",
+      insufficient_samples: "Collecting matched gas readings during heating and non-heating periods.",
+      insufficient_demand_spread: "Cost learning needs examples across a wider range of heating demand.",
+    };
+    const reason = attrs.reason || calibration.reason;
+    const message = messages[reason] || (status?.available === true
+      ? "Gas calibration is ready. Daily estimates also need complete readings and forecast coverage."
+      : "Cost estimates are unavailable. Check the optional gas inputs and the details below.");
+    const checks = Array.isArray(status?.checks) ? status.checks.filter(check => check && typeof check.detail === "string") : [];
+    const count = this._finiteNumber(calibration.sample_count);
+    return this._detail("cost-learning", "Optional gas cost learning", `<p>Cost learning runs separately and does not delay automatic heating timing.</p><p>${this._escape(message)}</p>${count !== null ? `<p>Matched gas readings: ${this._escape(String(count))}</p>` : ""}${checks.length ? `<ul>${checks.map(check => `<li>${this._escape(check.detail)}</li>`).join("")}</ul>` : ""}`);
   }
 
   _renderDashboardMode(mode) {
@@ -712,7 +729,7 @@ class CentralHeatingControllerCard extends HTMLElement {
         ${this._renderDashboardForecast()}${this._renderNextChanges()}${this._renderControlChoice()}
         <div class="chc-now-links">${this._dashboardLink("schedule", "Change comfort times")}${historyEntity ? `<button type="button" class="chc-link-button" data-more-info="${this._escape(historyEntity)}">Past temperatures</button>` : ""}</div>
         <p class="chc-progress-link">${this._dashboardLink("learning", `${progress} →`)}</p>
-        ${this._detail("costs", "Heating costs", `<div class="chc-cost-grid">${cost}</div><p>Heating only; hot water and the standing charge are excluded. Estimates need enough matched gas readings.</p>`)}
+        ${this._detail("costs", "Heating costs", `<div class="chc-cost-grid">${cost}</div><p>Heating only; hot water and the standing charge are excluded. Cost learning runs separately from automatic heating timing.</p>`)}
         ${forecast?.attributes?.confidence === "learning" ? '<p class="chc-small-note">Temperature estimates are still improving as more readings arrive.</p>' : ""}`;
     } else if (mode === "schedule") {
       const settings = plan?.attributes?.settings;
@@ -738,10 +755,10 @@ class CentralHeatingControllerCard extends HTMLElement {
       const heading = readiness.controlState === "active" ? "Automatic timing is on" : readiness.unavailable ? "Learning information unavailable" : readiness.attrs.ready === true ? "Ready to use automatic timing" : "Still learning your home";
       const needs = this._learningNeeds();
       const response = forecast.heating_response_learned === true ? this._formatNumber(forecast.heating_response_minutes, "min") : "Still learning";
-      const cost = this._state(this._entities.heatingCostToday)?.attributes?.calibration;
-      const technical = `${this._renderReadiness("open")}<div class="chc-learning-grid">${this._renderMetric("Temperature samples", String(forecast.learned_samples ?? "Waiting"))}${this._renderMetric("Heating response time", response)}${this._renderMetric("Matched gas readings", String(cost?.sample_count ?? 0))}</div>`;
+      const technical = `${this._renderReadiness("open")}<div class="chc-learning-grid">${this._renderMetric("Temperature samples", String(forecast.learned_samples ?? "Waiting"))}${this._renderMetric("Heating response time", response)}</div>`;
       body = `<section class="chc-learning-summary"><h2>${heading}</h2><p>${this._escape(this._policySummary())}</p>${readiness.controlState === "active" ? '<p>The safety checks have passed. You can return to your existing schedule at any time.</p>' : readiness.attrs.ready === true ? readiness.controlState === "paused" ? '<p>Return to Auto and end any temporary override before enabling automatic timing.</p>' : '<p>The checks have passed. Automatic timing starts only when you enable it.</p>' : `<h3>What is still needed</h3><ul>${needs.map(need => `<li>${this._escape(need)}</li>`).join("")}</ul>`}</section>${this._renderSmartAction()}
         <section class="chc-accuracy-summary"><h3>How close were the forecasts?</h3><p>Compared with measured indoor temperatures. Smaller errors are better.</p><div class="chc-learning-grid">${accuracy}</div></section>
+        ${this._renderCostLearning()}
         ${this._detail("checks", "Detailed learning and safety checks", technical)}
         ${this._detail("planning", "Planning settings", `<label class="chc-enable"><input type="checkbox" data-planning-enabled ${this._planningPending ? "disabled" : ""} ${plan?.attributes?.settings?.enabled === true ? "checked" : ""}> Prepare automatic heating plans</label><p>Turning planning off keeps your existing schedule in control.</p><span role="status">${this._escape(this._planningMessage || "")}</span>`)}
         ${readiness.controlState === "fallback" && readiness.attrs.fallback_reason ? `<p class="chc-small-note">${this._escape(readiness.attrs.fallback_reason)}</p>` : ""}`;
@@ -941,7 +958,7 @@ class CentralHeatingControllerCard extends HTMLElement {
           ${this._renderMetric("Current", current)}
           ${this._renderMetric("Pre-heat start", preheat)}
           ${this._renderMetric("Arrival", arrival)}
-          ${this._renderMetric("Learned rate", learned)}
+          ${this._renderMetric("Learned heat gain", learned)}
         </div>
         ${forecast}
         <div class="chc-actions">
