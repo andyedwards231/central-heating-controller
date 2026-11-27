@@ -32,6 +32,8 @@ class SmartSchedulePlan:
     gap_drops: tuple["GapDrop", ...]
     objective_demand_hours: float
     terminal_recovery_cost_hours: float
+    shortfall_kind: str | None = None
+    shortfall_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -260,23 +262,31 @@ def plan_smart_schedule(
                                        hours=hours, step_minutes=5)
         points = tuple(forecast.points)
         shortfall = 0.0
+        accumulated_shortfall = 0.0
+        shortfall_kind = None
+        shortfall_at = None
         for point in points:
             point_utc = point.at.astimezone(timezone.utc)
             if point_utc < start_utc or point_utc > end_utc:
                 continue
             point_local = local(point.at)
             present = is_occupied(point_local)
-            if present and _in_night(point_local, nstart, nend) and point.indoor_temperature < night_minimum - 0.25:
-                shortfall = max(shortfall, night_minimum - point.indoor_temperature)
+            if not present:
+                continue
             arrival_warm = arrival is not None and arrival <= point_local < arrival + timedelta(hours=1)
-            if (scheduled(point_local) and present) or arrival_warm:
-                floor = comfort_temperature
-            elif present and not _in_night(point_local, nstart, nend):
-                floor = max(night_minimum, comfort_temperature - selected_gap_drop(point_utc, values))
+            if scheduled(point_local) or arrival_warm:
+                floor, kind = comfort_temperature, "comfort"
+            elif _in_night(point_local, nstart, nend):
+                floor, kind = night_minimum, "night"
             else:
-                floor = None
-            if floor is not None and point.indoor_temperature < floor - 0.25:
-                shortfall = max(shortfall, floor - point.indoor_temperature)
+                floor = max(night_minimum, comfort_temperature - selected_gap_drop(point_utc, values))
+                kind = "daytime"
+            if point.indoor_temperature < floor - 0.25:
+                deficit = floor - point.indoor_temperature
+                accumulated_shortfall += deficit
+                # Forecast points are chronological. Keep the first worst point.
+                if deficit > shortfall:
+                    shortfall, shortfall_kind, shortfall_at = deficit, kind, point_local
         demand = sum(
             (max(0.0, float(getattr(a, "demand", 0.0))) + max(0.0, float(getattr(b, "demand", 0.0))))
             * 0.5 * max(0.0, (b.at - a.at).total_seconds() / 3600)
@@ -292,11 +302,14 @@ def plan_smart_schedule(
         terminal_cost = min(24.0, max(0.0, comfort_temperature - points[-1].indoor_temperature) / bounded_gain) if points else 0.0
         objective = demand + terminal_cost
         infeasible = shortfall > 0.25
-        return (infeasible, shortfall if infeasible else 0.0, objective, -sum(values), lead,
-                points, target, float(getattr(forecast, "confidence", 0.0)), demand, terminal_cost)
+        # The measured starting temperature can fix the worst miss across all
+        # candidates. Compare the remaining deficits before optimising demand.
+        score = (infeasible, shortfall, accumulated_shortfall, objective, -sum(values), lead)
+        return (score, points, target, float(getattr(forecast, "confidence", 0.0)),
+                demand, terminal_cost, shortfall_kind, shortfall_at)
 
     best, lead = min(((evaluate(selected_drops, candidate), candidate) for candidate in leads),
-                     key=lambda item: item[0][:5])
+                     key=lambda item: item[0][0])
 
     def coordinate_pass(current_lead: int) -> None:
         nonlocal best
@@ -305,19 +318,20 @@ def plan_smart_schedule(
             for drop in drops:
                 selected_drops[gap_index] = drop
                 trials.append((evaluate(selected_drops, current_lead), drop))
-            best, selected_drops[gap_index] = min(trials, key=lambda item: item[0][:5])
+            best, selected_drops[gap_index] = min(trials, key=lambda item: item[0][0])
 
     for _ in range(passes):
         coordinate_pass(lead)
     best, lead = min(((evaluate(selected_drops, candidate), candidate) for candidate in leads),
-                     key=lambda item: item[0][:5])
+                     key=lambda item: item[0][0])
     runs_used = 2 * len(leads) + passes * len(optimized_gaps) * len(drops)
     next_round_cost = len(optimized_gaps) * len(drops) + len(leads)
     if optimized_gaps and 100 - runs_used >= next_round_cost:
         coordinate_pass(lead)
         best, lead = min(((evaluate(selected_drops, candidate), candidate) for candidate in leads),
-                         key=lambda item: item[0][:5])
-    infeasible, shortfall, objective, _, _, points, target, confidence, demand, terminal_cost = best
+                         key=lambda item: item[0][0])
+    score, points, target, confidence, demand, terminal_cost, shortfall_kind, shortfall_at = best
+    infeasible, shortfall, _, objective, _, _ = score
 
     gap_drops: list[GapDrop] = []
     daily_drops: dict[date, float] = {}
@@ -332,4 +346,4 @@ def plan_smart_schedule(
                    or confidence < 0.5 or infeasible)
     return SmartSchedulePlan(points, target, max_selected_drop, lead, demand, provisional,
                              confidence, float(hours), daily_drops, not infeasible, shortfall,
-                             tuple(gap_drops), objective, terminal_cost)
+                             tuple(gap_drops), objective, terminal_cost, shortfall_kind, shortfall_at)

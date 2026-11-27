@@ -150,6 +150,28 @@ test("diagnostics start collapsed and escape untrusted readiness text", () => {
   assert.doesNotMatch(html, /<img src=x onerror=alert\(1\)>/);
 });
 
+test("an infeasible learned plan explains the temperature floor it is below", () => {
+  const plan = "sensor.central_heating_controller_smart_heating_plan";
+  const readiness = "sensor.central_heating_controller_smart_heating_readiness";
+  const shortfall = "The current indoor temperature is below the planned daytime minimum.";
+  const states = {
+    [plan]: { state: "preview", attributes: { preview: true, shortfall_explanation: shortfall } },
+    [readiness]: { state: "blocked", attributes: { ready: false, control_state: "preview", checks: [
+      { key: "plan_feasible", label: "Feasible heating plan", passed: false },
+    ] } },
+  };
+  const card = makeCard("learning", states);
+  const learning = card.shadowRoot.innerHTML;
+  assert.match(learning, /Automatic timing is not ready/);
+  assert.ok(learning.includes(shortfall));
+  assert.doesNotMatch(learning, /Still learning your home|reach your comfort temperature in time/);
+  assert.ok(makeCard("schedule", states).shadowRoot.innerHTML.includes(shortfall));
+  const updated = "The plan predicts indoor temperature below the overnight minimum on Saturday at 06:00.";
+  card.hass.states[plan] = { state: "preview", attributes: { preview: true, shortfall_explanation: updated } };
+  card.hass = card.hass;
+  assert.ok(card.shadowRoot.innerHTML.includes(updated));
+});
+
 test("view subscriptions include only entities used by that view", () => {
   const card = makeCard("overview");
   let renders = 0;

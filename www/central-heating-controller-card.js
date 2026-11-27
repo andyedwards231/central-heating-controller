@@ -102,7 +102,7 @@ class CentralHeatingControllerCard extends HTMLElement {
     const mode = this._config?.mode;
     if (mode === "overview") return ["status", "effectiveTarget", "controllerMode", "heatBlast", "preheatStart", "indoorTemperatureForecast", "heatingCostToday", "heatingCostTomorrow", "smartHeatingPlan", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
     if (mode === "schedule") return ["status", "controllerMode", "smartHeatingPlan", "indoorTemperatureForecast", "highTemperature", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
-    if (mode === "learning") return ["status", "controllerMode", "indoorTemperatureForecast", "learnedRate", "heatingCostToday", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
+    if (mode === "learning") return ["status", "controllerMode", "indoorTemperatureForecast", "learnedRate", "heatingCostToday", "smartHeatingPlan", "smartHeatingReadiness", "smartHeatingControl"].map(key => this._entities[key]);
     const existingEntities = Object.entries(this._entities)
       .filter(([key]) => !["smartHeatingReadiness", "smartHeatingControl"].includes(key))
       .map(([, entityId]) => entityId);
@@ -677,7 +677,11 @@ class CentralHeatingControllerCard extends HTMLElement {
     if (failed.has("heating_response")) needs.push("More heating starts and stops to measure the warm-up delay.");
     if (failed.has("demand_model")) needs.push("More examples of how the thermostat responds to a temperature change.");
     if (["accuracy_1h", "accuracy_6h", "accuracy_24h"].some(key => failed.has(key))) needs.push("More accurate temperature forecasts, checked across several days.");
-    if (failed.has("plan_feasible") && !["thermal_windows", "model_score", "heating_response", "demand_model"].some(key => failed.has(key))) needs.push("A plan that can reach your comfort temperature in time.");
+    const shortfall = this._state(this._entities.smartHeatingPlan)?.attributes?.shortfall_explanation;
+    if (failed.has("plan_feasible")) {
+      if (shortfall) needs.push(shortfall);
+      else if (!["thermal_windows", "model_score", "heating_response", "demand_model"].some(key => failed.has(key))) needs.push("A plan that meets your temperature settings.");
+    }
     const dataKeys = ["thermostat", "outdoor", "weather", "demand", "occupancy", "schedule", "arrival", "plan_fresh", "commands", "clock"];
     if (dataKeys.some(key => failed.has(key))) needs.push("A missing reading or heating connection needs attention. See detailed checks below.");
     if (failed.has("preview_enabled")) needs.push("Schedule planning needs to be enabled in the settings below.");
@@ -742,7 +746,7 @@ class CentralHeatingControllerCard extends HTMLElement {
         <div class="chc-setpoints">${this._renderNumberControl("Comfort temperature", this._entities.highTemperature)}</div><p class="chc-small-note">This temperature is shared with your existing heating schedule.</p>
         ${available ? this._renderScheduleEditor(settings, readiness.controlState) : '<p class="chc-empty">Comfort-time settings are unavailable. Check the integration.</p>'}
         ${this._detail("preview", readiness.controlState === "active" ? "See the automatic temperature plan" : "See the automatic timing preview", `<p>${readiness.controlState === "active" ? "This plan is controlling heating, unless you select Away, Off or a manual temperature." : "This is a proposed plan. The graph on Now shows what your heating is actually expected to do."}</p>${this._renderDashboardForecast(this._entities.smartHeatingPlan, true)}`)}
-        <p class="chc-progress-link">${this._dashboardLink("learning", readiness.attrs.ready === true ? "Ready to enable automatic timing →" : "See what automatic timing still needs to learn →")}</p>`;
+        <p class="chc-progress-link">${this._dashboardLink("learning", readiness.attrs.ready === true ? "Ready to enable automatic timing →" : "See what automatic timing still needs →")}</p>`;
     } else {
       const forecast = this._state(this._entities.indoorTemperatureForecast)?.attributes || {};
       const unit = forecast.temperature_unit || "°C";
@@ -752,7 +756,7 @@ class CentralHeatingControllerCard extends HTMLElement {
         const value = error !== null && error >= 0 && count > 0 ? `${this._formatNumber(unit === "°F" ? error * 1.8 : error, unit)} average error` : "Waiting for readings";
         return this._renderMetric(`${h === "1h" ? "1 hour" : h === "6h" ? "6 hours" : "24 hours"} ahead`, value);
       }).join("");
-      const heading = readiness.controlState === "active" ? "Automatic timing is on" : readiness.unavailable ? "Learning information unavailable" : readiness.attrs.ready === true ? "Ready to use automatic timing" : "Still learning your home";
+      const heading = readiness.controlState === "active" ? "Automatic timing is on" : readiness.unavailable ? "Learning information unavailable" : readiness.attrs.ready === true ? "Ready to use automatic timing" : readiness.state === "learning" ? "Still learning your home" : "Automatic timing is not ready";
       const needs = this._learningNeeds();
       const response = forecast.heating_response_learned === true ? this._formatNumber(forecast.heating_response_minutes, "min") : "Still learning";
       const technical = `${this._renderReadiness("open")}<div class="chc-learning-grid">${this._renderMetric("Temperature samples", String(forecast.learned_samples ?? "Waiting"))}${this._renderMetric("Heating response time", response)}</div>`;
@@ -773,7 +777,8 @@ class CentralHeatingControllerCard extends HTMLElement {
   }
 
   _renderDashboardForecast(entityId = this._entities.indoorTemperatureForecast, preview = false) {
-    return `<section class="chc-forecast chc-simple-forecast" aria-label="${preview ? "Automatic timing preview" : "Live heating forecast"}"><div class="chc-section-title">Next 24 hours</div>${this._renderForecast(true, entityId, "simple")}<p class="chc-forecast-note">Shading shows when heating is likely to be needed.</p></section>`;
+    const shortfall = preview ? this._state(entityId)?.attributes?.shortfall_explanation : null;
+    return `<section class="chc-forecast chc-simple-forecast" aria-label="${preview ? "Automatic timing preview" : "Live heating forecast"}"><div class="chc-section-title">Next 24 hours</div>${this._renderForecast(true, entityId, "simple")}<p class="chc-forecast-note">Shading shows when heating is likely to be needed.</p>${shortfall ? `<p class="chc-forecast-note">${this._escape(shortfall)}</p>` : ""}</section>`;
   }
 
   _renderCost(label, entityId) {

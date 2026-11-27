@@ -480,7 +480,9 @@ Readiness requires all of the following:
   ETA for intelligent arrival preheating; otherwise legacy preheating applies.
 - All checks passing continuously for an hour. Missing a coordinator check for
   over two minutes, restarting, changing the planning context or failing a
-  requirement restarts this confirmation period.
+  requirement restarts this confirmation period. Editing the weekly timetable
+  restarts the hour. Crossing a scheduled start or end keeps the accumulated
+  time when all checks still pass.
 
 Gas cost learning is optional and separate from heating readiness. Calibration,
 rate and gas freshness checks appear under `cost_status` in the readiness sensor
@@ -498,6 +500,12 @@ Low outside those periods while occupied, Eco while away, and the existing
 arrival preheating, Heat Blast and manual overrides. Editing preview times or
 night settings does not change this fallback schedule. Changing the comfort
 setpoint still changes the live High setting.
+
+If the room is still warming when High ends, check the control state on **Now**.
+In preview or fallback, the Home Assistant schedule's start is when the
+thermostat first requests High. To have a warmer room earlier, bring the start
+forward in that schedule helper. In active intelligent control, enter the time
+you want the room warm in **Comfort times** and let the planner choose the lead.
 
 Once enabled in Auto, the integration sends the current safe target from its
 intelligent plan, recalculating at least every five minutes. Thermostat limits
