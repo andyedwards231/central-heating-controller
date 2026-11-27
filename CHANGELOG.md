@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.1 — 2026-11-27
+
+Normal starts and ends in the Home Assistant schedule now preserve time already
+spent passing the automatic timing checks. Editing the weekly timetable or
+losing the schedule still restarts the one-hour check.
+
+When every candidate plan falls below a required temperature, the planner
+compares the size and duration of the shortfalls before optimising energy use.
+This helps it favour plans that recover sooner when the room is already cold.
+The Comfort times preview and Learning dashboard show which temperature
+requirement the selected plan misses and when.
+
+Update through HACS and restart Home Assistant. Copy the attached dashboard
+JavaScript and change the resource URL to
+`/local/central-heating-controller-card.js?v=1.9.1`.
+
+Validated with 519 Python tests, 72 JavaScript tests and Ruff.
+
 ## 1.9.0 — 2026-10-30
 
 Separates optional gas cost learning from automatic heating readiness. Unstable

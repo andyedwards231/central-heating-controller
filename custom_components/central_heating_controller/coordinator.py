@@ -384,13 +384,17 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             return
         old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
+        old_state = old_state if isinstance(old_state, State) else None
+        new_state = new_state if isinstance(new_state, State) else None
         entity_id = event.data.get("entity_id")
         if entity_id == self.config[CONF_SCHEDULE]:
             self.forecast_inputs.invalidate_schedule(entity_id)
             self._preview_cache = None
-            self._smart_healthy_since = None
-        old_state = old_state if isinstance(old_state, State) else None
-        new_state = new_state if isinstance(new_state, State) else None
+            # A normal on/off edge follows the timetable already used to plan.
+            # Preserve evidence across it, but remember even a brief outage
+            # if the schedule recovers before the queued refresh runs.
+            if new_state is None or new_state.state not in ("on", "off"):
+                self._smart_healthy_since = None
         transition_probe = _CapturedEvent(
             entity_id=entity_id,
             old_state=old_state,
@@ -1348,7 +1352,8 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                                     cost_calibration=calibration,
                                     rate_available=rate_value is not None and rate_value > 0,
                                     gas_fresh=gas_fresh)
-        context = (json.dumps(self.smart_settings(), sort_keys=True), self.settings.high_temperature,
+        context = (json.dumps(self.smart_settings(), sort_keys=True), plan.get("existing_schedule"),
+                   self.settings.high_temperature,
                    self.settings.eco_temperature, tuple(self._learning_sources()), occupied,
                    self.controller_mode)
         if context != self._smart_health_context:
@@ -1392,7 +1397,7 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
         else:
             control = "preview"
             explanation = ("Ready to enable. The existing heating schedule remains in control."
-                           if readiness["ready"] else "Preview only. The existing heating schedule remains in control while learning continues.")
+                           if readiness["ready"] else "Preview only. The existing heating schedule remains in control.")
         if self._command_error:
             explanation = self._command_error
         learning_keys = {"thermal_windows", "model_score", "heating_response", "demand_model",
@@ -1544,9 +1549,10 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
                     break
                 except ValueError:
                     continue
+            model = deepcopy(self.thermal_model)
             planner = partial(
                 plan_smart_schedule, local_now, indoor, inputs.outdoor_temperature,
-                deepcopy(self.thermal_model), settings["weekly_schedule"],
+                model, settings["weekly_schedule"],
                 occupied_at=lambda at: occupied, arrival_at=arrival,
                 comfort_at=None if use_weekly_schedule else inputs.schedule_high,
                 night_start=settings["night_start"], night_end=settings["night_end"],
@@ -1559,15 +1565,36 @@ class ControllerCoordinator(DataUpdateCoordinator[ControllerState]):
             plan = await self.hass.async_add_executor_job(planner)
             def native(value):
                 return round(TemperatureConverter.convert(value, "°C", unit), 2) if value is not None else None
-            explanation = "Preview only — your current heating schedule remains in control."
-            if plan.provisional:
+            explanation = "Preview only. Your current heating schedule remains in control."
+            if not model.ready:
                 explanation += " Still learning how your house heats and cools."
+            shortfall_explanation = None
             if not plan.feasible:
-                explanation += " The model cannot yet reach all comfort temperatures in time."
+                floor = {
+                    "comfort": "comfort temperature",
+                    "daytime": "planned daytime minimum",
+                    "night": "overnight minimum",
+                }.get(plan.shortfall_kind, "planned minimum temperature")
+                if (
+                    plan.shortfall_at is not None
+                    and plan.shortfall_at.astimezone(now.tzinfo) == now
+                ):
+                    shortfall_explanation = f"The current indoor temperature is below the {floor}."
+                elif plan.shortfall_at is not None:
+                    when = plan.shortfall_at.astimezone(zone).strftime("%A at %H:%M")
+                    shortfall_explanation = (
+                        f"The plan predicts indoor temperature below the {floor} on {when}."
+                    )
+                else:
+                    shortfall_explanation = f"The plan predicts indoor temperature below the {floor}."
+                explanation += f" {shortfall_explanation}"
             result = base | {
                 "state": "preview", "temperature_unit": unit, "generated_at": now.isoformat(),
                 "explanation": explanation, "provisional": plan.provisional, "feasible": plan.feasible,
                 "comfort_shortfall_c": plan.comfort_shortfall_c,
+                "shortfall_kind": plan.shortfall_kind,
+                "shortfall_at": plan.shortfall_at.isoformat() if plan.shortfall_at else None,
+                "shortfall_explanation": shortfall_explanation,
                 "schedule_source": "integration" if use_weekly_schedule else "existing_schedule",
                 "recovery_lead_minutes": plan.recovery_lead_minutes,
                 "estimated_demand_hours": round(plan.total_demand_hours, 3),

@@ -1,7 +1,7 @@
 """Integration coverage for coordinator temperature forecasts."""
 
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from custom_components.central_heating_controller.const import (
     CONF_WEATHER,
 )
 from custom_components.central_heating_controller.forecast_inputs import ForecastInputsResult
+from custom_components.central_heating_controller.smart_schedule import SmartSchedulePlan
 from tests.test_coordinator import NOW, _set_baseline_states, _setup_coordinator
 
 
@@ -293,7 +294,6 @@ async def test_accuracy_history_restores_only_for_matching_learning_sources(hass
 
 async def test_smart_preview_is_separate_and_failure_does_not_control(hass, service_call_mock):
     """Preview computation cannot issue thermostat commands, even on failure."""
-    from unittest.mock import patch
     _set_baseline_states(hass)
     _set_forecast_states(hass)
     coordinator, _ = await _setup_coordinator(hass, data=_forecast_config())
@@ -305,6 +305,7 @@ async def test_smart_preview_is_separate_and_failure_does_not_control(hass, serv
     assert preview['settings']['night_temperature'] == 16
     assert preview['settings']['daytime_drop'] == 2
     assert preview['provisional'] is True
+    assert "Still learning how your house heats and cools." in preview["explanation"]
     service_call_mock.assert_not_awaited()
     coordinator._preview_cache = None
     with patch('custom_components.central_heating_controller.coordinator.plan_smart_schedule', side_effect=ValueError('bad weather')):
@@ -312,6 +313,43 @@ async def test_smart_preview_is_separate_and_failure_does_not_control(hass, serv
     assert failed['state'] == 'unavailable'
     assert failed['settings'] == preview['settings']
     service_call_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("kind", "minutes", "expected"), [
+    ("daytime", 0, "The current indoor temperature is below the planned daytime minimum."),
+    ("comfort", 60, "The plan predicts indoor temperature below the comfort temperature"),
+    ("daytime", 60, "The plan predicts indoor temperature below the planned daytime minimum"),
+    ("night", 60, "The plan predicts indoor temperature below the overnight minimum"),
+])
+async def test_learned_preview_explains_shortfalls_without_blame_on_learning(
+    hass, kind, minutes, expected,
+):
+    _set_baseline_states(hass)
+    _set_forecast_states(hass)
+    coordinator, _ = await _setup_coordinator(hass, data=_forecast_config())
+    await _forecast(coordinator, schedule_high=lambda _: True)
+    coordinator._preview_cache = None
+    shortfall_at = NOW + timedelta(minutes=minutes)
+    plan = SmartSchedulePlan(
+        points=(), target_at=lambda _: 20, daytime_drop=2, recovery_lead_minutes=30,
+        total_demand_hours=1, provisional=True, confidence=0.95, hours=24,
+        daily_drops={}, feasible=False, comfort_shortfall_c=0.5, gap_drops=(),
+        objective_demand_hours=1, terminal_recovery_cost_hours=0,
+        shortfall_kind=kind, shortfall_at=shortfall_at,
+    )
+    with (
+        patch.object(type(coordinator.thermal_model), "ready", True),
+        patch("custom_components.central_heating_controller.coordinator.plan_smart_schedule",
+              return_value=plan),
+    ):
+        preview = await coordinator._async_smart_preview(NOW, coordinator.data, True, False)
+    assert preview["feasible"] is False
+    assert preview["provisional"] is True
+    assert preview["shortfall_kind"] == kind
+    assert preview["shortfall_at"] == shortfall_at.isoformat()
+    assert expected in preview["shortfall_explanation"]
+    assert preview["shortfall_explanation"] in preview["explanation"]
+    assert "Still learning" not in preview["explanation"]
 
 
 async def test_smart_schedule_updates_preserve_sources_and_validate_atomically(hass):

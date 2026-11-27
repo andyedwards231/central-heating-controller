@@ -5,6 +5,7 @@ from dataclasses import replace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from homeassistant.core import Event
 from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.central_heating_controller.models import PersistentState
@@ -245,13 +246,15 @@ async def test_real_readiness_requires_uninterrupted_hour_and_drops_on_stale_dem
         "heating_response_learned": True, "demand_model_learned": True,
     })
 
+    timetable = {"monday": [{"start": "07:00", "end": "09:00"}]}
+
     def evaluate(at, *, stale=False):
         for entity in ("climate.hallway", "sensor.outdoor_temperature", "sensor.demand"):
             hass.states.get(entity).last_reported = at
         if stale:
             hass.states.get("sensor.demand").last_reported = at - timedelta(minutes=31)
         plan = {"generated_at": at.isoformat(), "forecast": [{"temperature": 20}],
-                "feasible": True, "provisional": False}
+                "feasible": True, "provisional": False, "existing_schedule": timetable}
         with patch("custom_components.central_heating_controller.coordinator.dt_util.utcnow", return_value=at):
             return coordinator._smart_readiness(at, state, plan, True, False)
 
@@ -262,6 +265,15 @@ async def test_real_readiness_requires_uninterrupted_hour_and_drops_on_stale_dem
         result = evaluate(NOW + timedelta(minutes=minute))
     assert result["ready"] is True
     assert result["cost_status"]["available"] is False
+    # Crossing the already-planned morning boundary refreshes the schedule
+    # but should not hand control back for the first hour of comfort.
+    old_schedule = hass.states.get("schedule.heating")
+    hass.states.async_set("schedule.heating", "on")
+    with patch.object(coordinator, "_start_event_worker"):
+        coordinator._handle_state_change(Event("state_changed", {
+            "entity_id": "schedule.heating", "old_state": old_schedule,
+            "new_state": hass.states.get("schedule.heating"),
+        }))
     coordinator.heating_cost_model.calibration.side_effect = RuntimeError("bad gas history")
     throwing_calibration = evaluate(NOW + timedelta(minutes=61))
     assert throwing_calibration["ready"] is True
@@ -271,6 +283,9 @@ async def test_real_readiness_requires_uninterrupted_hour_and_drops_on_stale_dem
     malformed_calibration = evaluate(NOW + timedelta(minutes=62))
     assert malformed_calibration["ready"] is True
     assert malformed_calibration["cost_status"]["available"] is False
+    # Editing a timetable changes the planning context even while its state is on.
+    timetable = {"monday": [{"start": "06:30", "end": "09:00"}]}
+    assert evaluate(NOW + timedelta(minutes=62, seconds=30))["ready"] is False
     stale = evaluate(NOW + timedelta(minutes=63), stale=True)
     assert stale["ready"] is False
     assert "Heating activity signal" in stale["blockers"]

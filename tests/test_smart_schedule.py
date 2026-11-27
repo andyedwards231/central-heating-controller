@@ -88,6 +88,50 @@ def test_unreachable_comfort_deadline_is_reported_as_infeasible() -> None:
     assert plan.comfort_shortfall_c > 0
 
 
+def test_initial_miss_does_not_hide_improvement_at_next_comfort_deadline() -> None:
+    now = datetime(2026, 11, 27, 6, 30, tzinfo=ZoneInfo("Europe/London"))
+    plan = plan_smart_schedule(
+        now, 17.5, lambda _: 6, ThermalForecaster(),
+        {"friday": [{"start": "06:00", "end": "08:00"},
+                    {"start": "12:00", "end": "14:00"}]},
+        hours=24,
+    )
+
+    # The morning deadline has already been missed. Full recovery is still
+    # attempted before noon even though the measured 2.5°C miss is unchanged.
+    assert not plan.feasible
+    assert plan.comfort_shortfall_c == 2.5
+    assert plan.shortfall_kind == "comfort"
+    assert plan.shortfall_at == now
+    noon = now.replace(hour=12, minute=0)
+    assert plan.target_at(noon - timedelta(minutes=30)) == 20
+    assert next(point for point in plan.points if point.at == noon).indoor_temperature > 19
+
+
+@pytest.mark.parametrize(
+    ("hour", "expected_kind", "expected_shortfall"),
+    [(1, "night", 2), (12, "daytime", 4)],
+)
+def test_shortfall_identifies_worst_occupied_floor(hour, expected_kind, expected_shortfall) -> None:
+    class ConstantForecaster:
+        def forecast(self, start, indoor, outside, target, *, hours, step_minutes):
+            points = tuple(
+                SimpleNamespace(
+                    at=start + timedelta(minutes=minute), indoor_temperature=14, demand=0,
+                )
+                for minute in (0, 5)
+            )
+            return SimpleNamespace(points=points, confidence=0.8)
+
+    now = datetime(2026, 10, 20, hour, tzinfo=ZoneInfo("Europe/London"))
+    plan = plan_smart_schedule(now, 14, lambda _: 6, ConstantForecaster(), {}, hours=24)
+    assert not plan.feasible
+    assert plan.comfort_shortfall_c == expected_shortfall
+    assert plan.shortfall_kind == expected_kind
+    assert plan.shortfall_at == now  # The first of two equally cold points.
+    assert plan.shortfall_at.tzinfo is now.tzinfo
+
+
 def test_coordinate_search_selects_different_drops_for_separate_gaps() -> None:
     class GapPreferenceForecaster:
         sample_count = 100
@@ -204,6 +248,8 @@ def test_away_house_is_not_marked_infeasible_for_missing_occupied_floors() -> No
     assert plan.target_at(now) == 16
     assert plan.feasible
     assert plan.comfort_shortfall_c == 0
+    assert plan.shortfall_kind is None
+    assert plan.shortfall_at is None
 
 
 def test_common_terminal_cost_prevents_deferred_cold_recovery_and_keeps_demands_separate() -> None:
